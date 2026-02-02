@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "open-mcp-skills": {
+      "type": "http",
+      "url": "http://open-mcp-skills-alb-222909331.us-east-1.elb.amazonaws.com/mcp"
+    }
+  }
+}

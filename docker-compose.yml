@@ -1,0 +1,68 @@
+services:
+  # MCP Skills Server
+  mcp-server:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - LOG_LEVEL=INFO
+      - SKILLS_DIR=/app/skills
+      - SKILLS_WATCH_ENABLED=true
+    volumes:
+      - ./skills:/app/skills:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================
+  # 以下服务暂时未使用，保留配置供将来启用
+  # ============================================
+
+  # # Redis for Pub/Sub and caching (多实例同步时启用)
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis_data:/data
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+
+  # # DynamoDB Local (for development)
+  # dynamodb-local:
+  #   image: amazon/dynamodb-local:latest
+  #   ports:
+  #     - "8001:8000"
+  #   command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/home/dynamodblocal/data"]
+  #   volumes:
+  #     - dynamodb_data:/home/dynamodblocal/data
+  #   restart: unless-stopped
+
+  # # LocalStack (for S3 and other AWS services)
+  # localstack:
+  #   image: localstack/localstack:latest
+  #   ports:
+  #     - "4566:4566"
+  #   environment:
+  #     - SERVICES=s3,secretsmanager
+  #     - DEBUG=1
+  #     - DATA_DIR=/var/lib/localstack/data
+  #   volumes:
+  #     - localstack_data:/var/lib/localstack
+  #   restart: unless-stopped
+
+# volumes:
+#   redis_data:
+#   dynamodb_data:
+#   localstack_data:
