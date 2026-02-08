@@ -3,7 +3,7 @@
 # Build context should be the parent directory (open-mcp-skills/)
 
 # Stage 1: Build
-FROM public.ecr.aws/docker/library/python:3.11-slim AS builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
@@ -20,13 +20,14 @@ RUN pip install --no-cache-dir build && \
     pip install --no-cache-dir .
 
 # Stage 2: Runtime
-FROM public.ecr.aws/docker/library/python:3.11-slim AS runtime
+FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user

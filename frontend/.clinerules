@@ -1,0 +1,14 @@
+# Project Guidelines
+
+- Always check for guidance from the awslabs.frontend-mcp-server MCP server when implementing new features or adding new pages
+- Always keep the README.md in sync with new capabilities
+- Always prefer using global Zustand store vs. creating local state or passing props
+- Routing uses react-router v7 in Declarative mode
+- Use shadcn charts for any charting https://ui.shadcn.com/charts
+- When creating new pages, see if any reference layouts exist that be reused from shadcn blocks https://ui.shadcn.com/blocks
+- Always use shadcn UI components if a component is available in the shadcn registry vs. creating custom components https://ui.shadcn.com/docs
+
+- Keep your updates minimal and focused
+- Check project files before suggesting structural or dependency changes
+- When adding new features, don't complete the analysis prematurely, continue analyzing even if you think you found a solution
+- Ensure the code is complete and pages and components for new features are implemented fully and connected with the rest of the application

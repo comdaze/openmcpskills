@@ -49,7 +49,14 @@ class Settings(BaseSettings):
 
     # S3
     s3_endpoint_url: str | None = None
-    s3_skills_bucket: str = "mcp-skills-bucket"
+    s3_skills_bucket: str = "mcp-skills-bucket-383570952416"
+    s3_skills_prefix: str = "skills/"
+
+    # Storage backend
+    storage_backend: Literal["local", "s3"] = "local"
+    skill_cache_dir: Path = Field(default=Path("/tmp/skill-cache"))
+    dynamodb_invocation_logs_table: str = "mcp-invocation-logs"
+    invocation_log_ttl_days: int = 30
 
     # Authentication (AWS Cognito)
     cognito_enabled: bool = False

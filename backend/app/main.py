@@ -13,6 +13,9 @@ from app.api.deps import (
     set_mcp_engine,
     set_session_manager,
     set_skill_loader,
+    set_metadata_store,
+    set_invocation_logger,
+    set_s3_store,
 )
 from app.core.config import get_settings
 from app.services.mcp_engine import MCPEngine
@@ -40,7 +43,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize services
     skill_loader = SkillLoader()
     session_manager = SessionManager()
-    mcp_engine = MCPEngine(skill_loader, session_manager)
+
+    metadata_store = None
+    invocation_logger = None
+    s3_store = None
+
+    if settings.storage_backend == "s3":
+        from app.services.s3_store import S3SkillStore
+        from app.services.metadata_store import MetadataStore
+        from app.services.invocation_logger import InvocationLogger
+
+        s3_store = S3SkillStore()
+        metadata_store = MetadataStore()
+        invocation_logger = InvocationLogger()
+        set_metadata_store(metadata_store)
+        set_invocation_logger(invocation_logger)
+        set_s3_store(s3_store)
+        logger.info("Storage backend: S3 + DynamoDB")
+    else:
+        logger.info("Storage backend: local filesystem")
+
+    mcp_engine = MCPEngine(skill_loader, session_manager, metadata_store, invocation_logger)
 
     # Set global instances for dependency injection
     set_skill_loader(skill_loader)
@@ -50,11 +73,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Start session manager (for cleanup task)
     await session_manager.start()
 
-    # Load skills from directory
+    # Load skills
     skills_path = settings.skills_path
+    if settings.storage_backend == "s3":
+        logger.info("Syncing skills from S3...")
+        s3_count = await s3_store.sync_all_to_local()
+        if s3_count > 0:
+            skills_path = settings.skill_cache_dir
+            logger.info(f"Synced {s3_count} skills from S3, loading from cache")
+        else:
+            logger.info("No skills in S3 yet, loading from local directory")
+
     logger.info(f"Loading Claude Skills from: {skills_path}")
     count = await skill_loader.load_from_directory(skills_path)
     logger.info(f"Loaded {count} Claude Skills")
+
+    # Restore invocation counts from DynamoDB
+    if metadata_store:
+        for skill_id, skill in skill_loader.skills.items():
+            meta = await metadata_store.get_skill(skill_id)
+            if meta:
+                skill.invocation_count = meta.get("invocation_count", 0)
 
     # Start file watcher if enabled
     watcher_task = None

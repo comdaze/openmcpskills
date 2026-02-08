@@ -4,19 +4,28 @@ Implements the Model Context Protocol over Streamable HTTP,
 serving Claude Skills as MCP tools/prompts.
 """
 
+from __future__ import annotations
+
+import json
 import logging
+import time
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from app.core.config import get_settings
 from app.models.skill import Skill, SkillStatus
 from app.services.session_manager import SessionManager
 from app.services.skill_loader import SkillLoader
 
+if TYPE_CHECKING:
+    from app.services.metadata_store import MetadataStore
+    from app.services.invocation_logger import InvocationLogger
+
 logger = logging.getLogger(__name__)
 
-# MCP Protocol Version
-MCP_PROTOCOL_VERSION = "2025-11-25"
+# MCP Protocol Versions (newest first)
+SUPPORTED_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
+MCP_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]  # default/latest
 
 
 class MCPEngine:
@@ -33,10 +42,19 @@ class MCPEngine:
         self,
         skill_loader: SkillLoader,
         session_manager: SessionManager,
+        metadata_store: "MetadataStore | None" = None,
+        invocation_logger: "InvocationLogger | None" = None,
     ) -> None:
         self._skill_loader = skill_loader
         self._session_manager = session_manager
+        self._metadata_store = metadata_store
+        self._invocation_logger = invocation_logger
         self._settings = get_settings()
+        
+        # Cache for tools list
+        self._tools_cache: list[dict] | None = None
+        self._tools_cache_time: float = 0
+        self._tools_cache_ttl: float = 60.0  # Cache for 60 seconds
 
         # Server info
         self._server_name = self._settings.app_name
@@ -121,6 +139,18 @@ class MCPEngine:
                 return None
             return self._error_response(msg_id, -32603, str(e))
 
+    def _negotiate_protocol_version(self, client_version: str) -> str | None:
+        """Negotiate protocol version with client.
+
+        Returns the best matching version, or None if incompatible.
+        Client sends its preferred version; server picks the highest
+        version both sides support (client version or lower).
+        """
+        for version in SUPPORTED_PROTOCOL_VERSIONS:
+            if version <= client_version:
+                return version
+        return None
+
     async def _handle_initialize(
         self,
         msg_id: Any,
@@ -129,13 +159,25 @@ class MCPEngine:
     ) -> dict[str, Any]:
         """Handle initialize request."""
         client_info = params.get("clientInfo", {})
-        protocol_version = params.get("protocolVersion", MCP_PROTOCOL_VERSION)
+        client_version = params.get("protocolVersion", MCP_PROTOCOL_VERSION)
         client_capabilities = params.get("capabilities", {})
 
         logger.info(
             f"Initialize from client: {client_info.get('name', 'unknown')} "
-            f"version {client_info.get('version', 'unknown')}"
+            f"version {client_info.get('version', 'unknown')}, "
+            f"protocol {client_version}"
         )
+
+        # Negotiate protocol version
+        negotiated_version = self._negotiate_protocol_version(client_version)
+        if not negotiated_version:
+            return self._error_response(
+                msg_id, -32602,
+                f"Unsupported protocol version: {client_version}. "
+                f"Supported: {', '.join(SUPPORTED_PROTOCOL_VERSIONS)}"
+            )
+
+        logger.info(f"Negotiated protocol version: {negotiated_version}")
 
         # Get server capabilities
         server_capabilities = self.get_server_capabilities()
@@ -149,7 +191,7 @@ class MCPEngine:
             )
 
         return self._success_response(msg_id, {
-            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "protocolVersion": negotiated_version,
             "capabilities": server_capabilities,
             "serverInfo": {
                 "name": self._server_name,
@@ -170,9 +212,22 @@ class MCPEngine:
         if session_id:
             await self._session_manager.update_activity(session_id)
 
+        # Check cache
+        current_time = time.time()
+        if (self._tools_cache is not None and 
+            current_time - self._tools_cache_time < self._tools_cache_ttl):
+            return self._success_response(msg_id, {
+                "tools": self._tools_cache,
+            })
+
+        # Build tools list
         tools = []
         for skill in self._skill_loader.active_skills.values():
             tools.append(self._skill_to_tool(skill))
+
+        # Update cache
+        self._tools_cache = tools
+        self._tools_cache_time = current_time
 
         return self._success_response(msg_id, {
             "tools": tools,
@@ -214,15 +269,28 @@ class MCPEngine:
                 f"Skill not active: {tool_name}"
             )
 
-        # Update invocation stats
-        skill.invocation_count += 1
-        skill.last_invoked_at = datetime.utcnow()
+        # Track timing
+        start = time.monotonic()
 
         # Build the response with skill instructions
         user_args = arguments.get("arguments", "")
-
-        # Construct the full instruction content
         instruction_content = self._build_instruction_content(skill, user_args)
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+
+        # Async persistence (non-blocking) - DynamoDB is source of truth
+        if self._metadata_store:
+            import asyncio
+            asyncio.create_task(self._metadata_store.increment_invocation(tool_name))
+        if self._invocation_logger:
+            self._invocation_logger.log(
+                skill_id=tool_name,
+                session_id=session_id or "",
+                method="tools/call",
+                duration_ms=duration_ms,
+                status="success",
+                params=json.dumps(arguments)[:1024] if arguments else None,
+            )
 
         return self._success_response(msg_id, {
             "content": [{

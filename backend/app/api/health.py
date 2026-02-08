@@ -13,9 +13,14 @@ router = APIRouter(tags=["Health"])
 
 
 @router.get("/health")
-async def health_check() -> dict[str, str]:
+async def health_check(
+    skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+) -> dict[str, Any]:
     """Basic health check endpoint."""
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "skills_loaded": len(skill_loader.active_skills),
+    }
 
 
 @router.get("/ready")
@@ -52,11 +57,5 @@ async def server_info(
     return {
         "name": settings.app_name,
         "version": settings.app_version,
-        "protocol_version": "2025-11-25",
-        "capabilities": {
-            "tools": True,
-            "resources": False,
-            "prompts": False,
-        },
-        "skills_count": len(skill_loader.active_skills),
+        "storage_backend": "S3 + DynamoDB",
     }
