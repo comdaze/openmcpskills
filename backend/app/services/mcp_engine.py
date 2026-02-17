@@ -10,6 +10,7 @@ import json
 import logging
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from app.core.config import get_settings
@@ -20,6 +21,7 @@ from app.services.skill_loader import SkillLoader
 if TYPE_CHECKING:
     from app.services.metadata_store import MetadataStore
     from app.services.invocation_logger import InvocationLogger
+    from app.services.code_interpreter import CodeInterpreterService, ExecutionResult, ExecutionStatus
 
 logger = logging.getLogger(__name__)
 
@@ -44,17 +46,14 @@ class MCPEngine:
         session_manager: SessionManager,
         metadata_store: "MetadataStore | None" = None,
         invocation_logger: "InvocationLogger | None" = None,
+        code_interpreter: "CodeInterpreterService | None" = None,
     ) -> None:
         self._skill_loader = skill_loader
         self._session_manager = session_manager
         self._metadata_store = metadata_store
         self._invocation_logger = invocation_logger
+        self._code_interpreter = code_interpreter
         self._settings = get_settings()
-        
-        # Cache for tools list
-        self._tools_cache: list[dict] | None = None
-        self._tools_cache_time: float = 0
-        self._tools_cache_ttl: float = 60.0  # Cache for 60 seconds
 
         # Server info
         self._server_name = self._settings.app_name
@@ -100,6 +99,9 @@ class MCPEngine:
         # Notifications don't have an id
         is_notification = msg_id is None
 
+        # Log all incoming requests for debugging
+        logger.info(f"MCP request: method={method}, id={msg_id}, params_keys={list(params.keys()) if params else []}")
+
         # Route to handler
         try:
             if method == "initialize":
@@ -112,6 +114,8 @@ class MCPEngine:
                 return await self._handle_tools_list(msg_id, params, session_id)
             elif method == "tools/call":
                 return await self._handle_tools_call(msg_id, params, session_id)
+            elif method == "code/execute":
+                return await self._handle_code_execute(msg_id, params, session_id)
             elif method == "prompts/list":
                 return await self._handle_prompts_list(msg_id, params, session_id)
             elif method == "prompts/get":
@@ -208,30 +212,63 @@ class MCPEngine:
         """Handle tools/list request.
 
         Returns available Claude Skills as MCP tools.
+        Supports pagination via cursor parameter.
         """
         if session_id:
             await self._session_manager.update_activity(session_id)
 
-        # Check cache
-        current_time = time.time()
-        if (self._tools_cache is not None and 
-            current_time - self._tools_cache_time < self._tools_cache_ttl):
-            return self._success_response(msg_id, {
-                "tools": self._tools_cache,
-            })
-
-        # Build tools list
+        # Get cursor for pagination (optional)
+        cursor = params.get("cursor")
+        
+        # For lazy loading: return lightweight tool list without full content
         tools = []
-        for skill in self._skill_loader.active_skills.values():
-            tools.append(self._skill_to_tool(skill))
-
-        # Update cache
-        self._tools_cache = tools
-        self._tools_cache_time = current_time
-
-        return self._success_response(msg_id, {
-            "tools": tools,
-        })
+        skill_ids = sorted(self._skill_loader._skill_paths.keys())
+        
+        # Apply cursor-based pagination if provided
+        start_idx = 0
+        if cursor:
+            try:
+                start_idx = skill_ids.index(cursor) + 1
+            except ValueError:
+                pass  # Invalid cursor, start from beginning
+        
+        # Return up to 100 tools per request
+        page_size = 100
+        page_skill_ids = skill_ids[start_idx:start_idx + page_size]
+        
+        for skill_id in page_skill_ids:
+            skill = await self._skill_loader.get_skill(skill_id)
+            if skill and skill.status == SkillStatus.ACTIVE:
+                tools.append(self._skill_to_tool(skill))
+        
+        # Add execute-python-code tool if code interpreter is available
+        if self._code_interpreter:
+            tools.append({
+                "name": "execute-python-code",
+                "description": "Execute Python code in a secure sandbox. Use this after a code_interpreter skill returns instructions and you've generated the code.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "skill": {
+                            "type": "string",
+                            "description": "The skill name that requested code execution (e.g., 'pptx')"
+                        },
+                        "code": {
+                            "type": "string",
+                            "description": "The Python code to execute"
+                        }
+                    },
+                    "required": ["skill", "code"]
+                }
+            })
+        
+        response_data = {"tools": tools}
+        
+        # Add nextCursor if there are more results
+        if start_idx + page_size < len(skill_ids):
+            response_data["nextCursor"] = skill_ids[start_idx + page_size - 1]
+        
+        return self._success_response(msg_id, response_data)
 
     async def _handle_tools_call(
         self,
@@ -243,6 +280,9 @@ class MCPEngine:
 
         For Claude Skills, returns the skill's instructions
         that the AI should follow to complete the task.
+        
+        For code_interpreter skills, executes code in sandbox
+        and returns the execution result.
         """
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
@@ -253,8 +293,16 @@ class MCPEngine:
         if session_id:
             await self._session_manager.update_activity(session_id)
 
-        # Get the skill
-        skill = self._skill_loader.get_skill(tool_name)
+        # Handle the special execute-python-code tool
+        if tool_name == "execute-python-code":
+            return await self._handle_code_execute(msg_id, {
+                "skill": arguments.get("skill", ""),
+                "code": arguments.get("code", ""),
+                "language": arguments.get("language", "python"),
+            }, session_id)
+
+        # Get the skill (lazy loading)
+        skill = await self._skill_loader.get_skill(tool_name)
         if not skill:
             return self._error_response(
                 msg_id,
@@ -272,33 +320,264 @@ class MCPEngine:
         # Track timing
         start = time.monotonic()
 
-        # Build the response with skill instructions
-        user_args = arguments.get("arguments", "")
-        instruction_content = self._build_instruction_content(skill, user_args)
+        # Get execution type from skill configuration
+        execution_type = skill.manifest.execution.type
 
-        duration_ms = int((time.monotonic() - start) * 1000)
+        if execution_type == "code_interpreter":
+            # Code interpreter type - return instructions for LLM to generate code
+            # The LLM will see the instructions and generate Python code
+            # Then the code will be executed in the sandbox
+            user_args = arguments.get("arguments", "")
+            instruction_content = self._build_instruction_content(skill, user_args)
+            
+            # Add code interpreter context
+            execution_config = skill.manifest.execution
+            code_context = "\n\n## Code Execution Environment\n\n"
+            code_context += "Your generated code will be executed in an AWS Bedrock Code Interpreter sandbox with:\n"
+            code_context += f"- Runtime: {execution_config.runtime}\n"
+            code_context += f"- Timeout: {execution_config.timeout}s\n"
+            code_context += f"- Network: {execution_config.network}\n"
+            if execution_config.dependencies:
+                code_context += f"- Pre-installed packages: {', '.join(execution_config.dependencies)}\n"
+            code_context += "\n**Important**: Write complete, executable Python code. Any files you create will be automatically uploaded to S3 and download links will be provided to the user.\n"
+            
+            instruction_content += code_context
 
-        # Async persistence (non-blocking) - DynamoDB is source of truth
+            duration_ms = int((time.monotonic() - start) * 1000)
+
+            # Log invocation
+            self._log_invocation(
+                tool_name, session_id, duration_ms, "success", arguments
+            )
+
+            return self._success_response(msg_id, {
+                "content": [{
+                    "type": "text",
+                    "text": instruction_content,
+                }],
+                "execution": {
+                    "type": "code_interpreter",
+                    "runtime": execution_config.runtime,
+                    "timeout": execution_config.timeout,
+                },
+                "isError": False,
+            })
+
+        else:
+            # Instruction type (default) - return instructions
+            user_args = arguments.get("arguments", "")
+            instruction_content = self._build_instruction_content(skill, user_args)
+
+            duration_ms = int((time.monotonic() - start) * 1000)
+
+            # Log invocation
+            self._log_invocation(
+                tool_name, session_id, duration_ms, "success", arguments
+            )
+
+            return self._success_response(msg_id, {
+                "content": [{
+                    "type": "text",
+                    "text": instruction_content,
+                }],
+                "execution": None,  # No code execution
+                "isError": False,
+            })
+
+    async def _handle_code_execute(
+        self,
+        msg_id: Any,
+        params: dict[str, Any],
+        session_id: str | None,
+    ) -> dict[str, Any]:
+        """Handle code/execute request for code_interpreter skills.
+        
+        Executes LLM-generated code in the sandbox.
+        """
+        skill_name = params.get("skill")
+        code = params.get("code")
+        language = params.get("language", "python")
+        
+        if not skill_name or not code:
+            return self._error_response(msg_id, -32602, "Missing skill or code")
+        
+        if session_id:
+            await self._session_manager.update_activity(session_id)
+        
+        # Get the skill
+        skill = await self._skill_loader.get_skill(skill_name)
+        if not skill:
+            return self._error_response(msg_id, -32602, f"Skill not found: {skill_name}")
+        
+        if skill.manifest.execution.type != "code_interpreter":
+            return self._error_response(
+                msg_id, -32602, 
+                f"Skill {skill_name} is not a code_interpreter skill"
+            )
+        
+        # Execute code in sandbox
+        from app.services.code_interpreter import ExecutionResult, ExecutionStatus
+        
+        if not self._code_interpreter:
+            return self._error_response(
+                msg_id, -32603, 
+                "Code interpreter service not configured"
+            )
+        
+        start = time.monotonic()
+        
+        try:
+            # Execute the code directly
+            result = await self._code_interpreter.execute_code(
+                code=code,
+                language=language,
+                timeout=skill.manifest.execution.timeout,
+                skill_id=skill_name,
+            )
+            
+            duration_ms = int((time.monotonic() - start) * 1000)
+            
+            # Log invocation
+            self._log_invocation(
+                skill_name, session_id, duration_ms,
+                "success" if result.status.value == "success" else "error",
+                {"code_length": len(code)}
+            )
+            
+            # Build response text with download links
+            text_parts = [result.stdout or "Execution completed"]
+            if result.stderr:
+                text_parts.append(f"\n⚠️ Errors:\n{result.stderr}")
+            if result.output_files:
+                text_parts.append("\n📎 生成的文件:")
+                for f in result.output_files:
+                    url = f.get("download_url", "")
+                    name = f.get("filename", "unknown")
+                    text_parts.append(f"  - {name}: {url}")
+            
+            return self._success_response(msg_id, {
+                "content": [{
+                    "type": "text",
+                    "text": "\n".join(text_parts),
+                }],
+                "execution": {
+                    "status": result.status.value,
+                    "exit_code": result.exit_code,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "duration_ms": result.duration_ms,
+                },
+                "files": result.output_files or [],
+                "isError": result.status.value != "success",
+            })
+            
+        except Exception as e:
+            logger.exception(f"Code execution failed: {e}")
+            return self._error_response(msg_id, -32603, f"Execution error: {str(e)}")
+
+    def _log_invocation(
+        self,
+        tool_name: str,
+        session_id: str | None,
+        duration_ms: int,
+        status: str,
+        arguments: dict[str, Any],
+    ) -> None:
+        """Log skill invocation asynchronously."""
+        import asyncio
+
         if self._metadata_store:
-            import asyncio
             asyncio.create_task(self._metadata_store.increment_invocation(tool_name))
+
         if self._invocation_logger:
             self._invocation_logger.log(
                 skill_id=tool_name,
                 session_id=session_id or "",
                 method="tools/call",
                 duration_ms=duration_ms,
-                status="success",
+                status=status,
                 params=json.dumps(arguments)[:1024] if arguments else None,
             )
 
-        return self._success_response(msg_id, {
-            "content": [{
-                "type": "text",
-                "text": instruction_content,
-            }],
-            "isError": False,
-        })
+    async def _execute_in_sandbox(
+        self,
+        skill: Skill,
+        arguments: dict[str, Any],
+    ) -> "ExecutionResult":
+        """Execute skill script in AgentCore sandbox.
+
+        Args:
+            skill: Skill to execute
+            arguments: Arguments from tools/call
+
+        Returns:
+            ExecutionResult with status, output, and files
+        """
+        from app.services.code_interpreter import ExecutionResult, ExecutionStatus
+
+        # Check if code interpreter is available
+        if not self._code_interpreter:
+            logger.error("Code interpreter not configured")
+            return ExecutionResult(
+                status=ExecutionStatus.ERROR,
+                exit_code=-1,
+                stdout="",
+                stderr="Code interpreter service not configured",
+                duration_ms=0,
+            )
+
+        execution = skill.manifest.execution
+
+        # Load script content
+        script_content = await self._load_script_content(skill, execution.entrypoint)
+
+        if not script_content:
+            return ExecutionResult(
+                status=ExecutionStatus.ERROR,
+                exit_code=-1,
+                stdout="",
+                stderr=f"Script not found: {execution.entrypoint}",
+                duration_ms=0,
+            )
+
+        # Execute script
+        return await self._code_interpreter.execute_skill_script(
+            skill_id=skill.id,
+            script_path=execution.entrypoint or "",
+            script_content=script_content,
+            arguments=arguments,
+            timeout=execution.timeout,
+            network_mode=execution.network,
+            dependencies=execution.dependencies,
+        )
+
+    async def _load_script_content(
+        self,
+        skill: Skill,
+        script_path: str | None,
+    ) -> str | None:
+        """Load script content from skill's script files.
+
+        Args:
+            skill: Skill containing the script
+            script_path: Relative path to script (e.g., "main.py")
+
+        Returns:
+            Script content or None if not found
+        """
+        if not script_path:
+            return None
+
+        # Search in skill's script_files
+        for file_path in skill.script_files:
+            if file_path.endswith(script_path):
+                try:
+                    return Path(file_path).read_text(encoding="utf-8")
+                except Exception as e:
+                    logger.error(f"Failed to read script {file_path}: {e}")
+                    return None
+
+        return None
 
     async def _handle_prompts_list(
         self,
