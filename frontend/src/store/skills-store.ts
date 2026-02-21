@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { apiFetch, API_BASE_URL } from '@/lib/api'
+import type { SkillExecution } from '@/types/skill'
 
 export interface Skill {
   id: string
@@ -21,6 +22,7 @@ export interface Skill {
       version?: string
       tags?: string[]
     }
+    execution?: SkillExecution
   }
 }
 
@@ -110,8 +112,12 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
 
   getSkillVersions: async (id) => {
     try {
-      const data = await apiFetch<{ versions: SkillVersion[] }>(`/admin/skills/${id}/versions`)
-      return data.versions
+      const data = await apiFetch<{ skill_id?: string; versions: (string | SkillVersion)[] }>(`/admin/skills/${id}/versions`)
+      return data.versions.map(v =>
+        typeof v === 'string'
+          ? { skill_id: id, version: v, published_at: '' }
+          : v
+      )
     } catch { return [] }
   },
 

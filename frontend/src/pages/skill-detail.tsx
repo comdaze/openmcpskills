@@ -6,8 +6,10 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { useSkillsStore, InvocationLog, SkillVersion } from '@/store/skills-store'
-import { ArrowLeft, RefreshCw, History, FileText, Activity, BookOpen } from 'lucide-react'
+import { ArrowLeft, RefreshCw, History, FileText, Activity, BookOpen, Play, Clock, Globe, Package } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
+import type { SkillExecution } from '@/types/skill'
+import { DEFAULT_EXECUTION } from '@/types/skill'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
@@ -25,6 +27,10 @@ export function SkillDetailPage() {
   const skillVersion = skill?.version || skill?.manifest?.metadata?.version || '-'
   const skillAuthor = skill?.author || skill?.manifest?.metadata?.author || 'Unknown'
   const skillTags: string[] = skill?.tags || skill?.manifest?.metadata?.tags || []
+
+  // Get execution configuration with defaults
+  const execution: SkillExecution = skill?.manifest?.execution || DEFAULT_EXECUTION
+  const isCodeInterpreter = execution.type === 'code_interpreter'
 
   useEffect(() => {
     if (!skills.length) fetchSkills()
@@ -53,6 +59,9 @@ export function SkillDetailPage() {
           <h1 className="text-2xl font-bold">{skillName}</h1>
           <p className="text-muted-foreground">{skillDesc}</p>
         </div>
+        <Badge variant={isCodeInterpreter ? 'default' : 'secondary'}>
+          {isCodeInterpreter ? '🚀 Code Interpreter' : '📝 Instruction'}
+        </Badge>
         <Badge variant={skill.status === 'active' ? 'default' : 'secondary'}>{skill.status}</Badge>
         <Button variant="outline" onClick={() => reloadSkill(skill.id)}>
           <RefreshCw className="mr-2 h-4 w-4" /> Reload
@@ -82,6 +91,78 @@ export function SkillDetailPage() {
               <CardContent><div className="text-2xl font-bold">{skillAuthor}</div></CardContent>
             </Card>
           </div>
+
+          {/* Execution Configuration Card */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Play className="h-4 w-4" />
+                Execution Configuration
+              </CardTitle>
+              <CardDescription>
+                {isCodeInterpreter 
+                  ? 'This skill executes code in a sandboxed environment'
+                  : 'This skill returns instructions for the AI to follow'}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                <div className="space-y-1">
+                  <div className="text-sm text-muted-foreground flex items-center gap-1">
+                    <Play className="h-3 w-3" /> Type
+                  </div>
+                  <div className="font-medium">
+                    <Badge variant={isCodeInterpreter ? 'default' : 'outline'}>
+                      {execution.type}
+                    </Badge>
+                  </div>
+                </div>
+                {isCodeInterpreter && (
+                  <>
+                    <div className="space-y-1">
+                      <div className="text-sm text-muted-foreground flex items-center gap-1">
+                        <Package className="h-3 w-3" /> Runtime
+                      </div>
+                      <div className="font-medium">{execution.runtime}</div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-sm text-muted-foreground flex items-center gap-1">
+                        <Clock className="h-3 w-3" /> Timeout
+                      </div>
+                      <div className="font-medium">{execution.timeout}s</div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-sm text-muted-foreground flex items-center gap-1">
+                        <Globe className="h-3 w-3" /> Network
+                      </div>
+                      <div className="font-medium">
+                        <Badge variant={execution.network === 'public' ? 'default' : 'secondary'}>
+                          {execution.network}
+                        </Badge>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+              {isCodeInterpreter && execution.entrypoint && (
+                <div className="mt-4 pt-4 border-t">
+                  <div className="text-sm text-muted-foreground mb-1">Entrypoint</div>
+                  <code className="text-sm bg-muted px-2 py-1 rounded">{execution.entrypoint}</code>
+                </div>
+              )}
+              {isCodeInterpreter && execution.dependencies.length > 0 && (
+                <div className="mt-4 pt-4 border-t">
+                  <div className="text-sm text-muted-foreground mb-2">Dependencies</div>
+                  <div className="flex flex-wrap gap-2">
+                    {execution.dependencies.map(dep => (
+                      <Badge key={dep} variant="outline">{dep}</Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {skillTags.length > 0 && (
             <Card>
               <CardHeader><CardTitle>Tags</CardTitle></CardHeader>
@@ -163,10 +244,10 @@ export function SkillDetailPage() {
                     <TableRow><TableCell colSpan={3} className="text-center text-muted-foreground">No versions</TableCell></TableRow>
                   ) : versions.map(v => (
                     <TableRow key={v.version}>
-                      <TableCell className="font-medium">v{v.version}</TableCell>
+                      <TableCell className="font-medium">{v.version}</TableCell>
                       <TableCell>{v.published_at ? new Date(v.published_at).toLocaleString() : '-'}</TableCell>
                       <TableCell>
-                        {v.version !== skill.version && (
+                        {v.version !== `v${skill.version}` && v.version !== skill.version && (
                           <Button variant="outline" size="sm" onClick={() => rollbackSkill(skill.id, v.version)}>
                             Rollback
                           </Button>
