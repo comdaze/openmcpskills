@@ -77,6 +77,9 @@ class S3SkillStore:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 await s3.download_file(self._bucket, obj["Key"], str(dest))
 
+            # Write current version marker for skill_loader to pick up
+            (local_path / ".current_version").write_text(version)
+
         return local_path
 
     async def list_versions(self, skill_id: str) -> list[str]:

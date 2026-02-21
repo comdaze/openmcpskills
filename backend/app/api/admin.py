@@ -49,6 +49,7 @@ class SkillResponse(BaseModel):
     id: str
     manifest: SkillManifestResponse
     status: SkillStatus
+    version: str | None = None
     source_path: str | None
     skill_md_path: str | None
     reference_files: list[str]
@@ -99,6 +100,7 @@ def skill_to_response(skill: Skill) -> SkillResponse:
             execution=skill.manifest.execution.model_dump() if skill.manifest.execution else None,
         ),
         status=skill.status,
+        version=skill.manifest.metadata.version,
         source_path=skill.source_path,
         skill_md_path=skill.skill_md_path,
         reference_files=skill.reference_files,

@@ -83,7 +83,7 @@ export function SkillsPage() {
                   <TableCell className="font-medium">{skill.name || skill.manifest?.name || skill.id}</TableCell>
                   <TableCell className="text-muted-foreground max-w-[300px] truncate">{skill.description || skill.manifest?.description}</TableCell>
                   <TableCell><Badge variant={statusVariant(skill.status)}>{skill.status}</Badge></TableCell>
-                  <TableCell>v{skill.version || '1'}</TableCell>
+                  <TableCell>{skill.version || skill.manifest?.metadata?.version || '-'}</TableCell>
                   <TableCell className="text-right">{skill.invocation_count ?? 0}</TableCell>
                   <TableCell onClick={e => e.stopPropagation()}>
                     <DropdownMenu>

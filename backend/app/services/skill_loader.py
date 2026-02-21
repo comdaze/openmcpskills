@@ -172,6 +172,11 @@ class SkillLoader:
                 status=SkillStatus.ACTIVE,
             )
 
+            # Set version from S3 marker if available
+            version_file = skill_path / ".current_version"
+            if version_file.exists():
+                skill.manifest.metadata.version = version_file.read_text().strip()
+
             # Discover additional files
             skill.script_files = self._discover_files(skill_path / SCRIPTS_DIR)
             skill.reference_files = self._discover_files(skill_path / REFERENCES_DIR)
