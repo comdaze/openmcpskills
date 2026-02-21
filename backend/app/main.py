@@ -8,7 +8,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import admin_router, health_router, mcp_router
+from app.api import admin_router, health_router, mcp_router, playground_router
 from app.api.deps import (
     set_mcp_engine,
     set_session_manager,
@@ -47,6 +47,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     metadata_store = None
     invocation_logger = None
     s3_store = None
+    code_interpreter = None
 
     if settings.storage_backend == "s3":
         from app.services.s3_store import S3SkillStore
@@ -63,7 +64,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     else:
         logger.info("Storage backend: local filesystem")
 
-    mcp_engine = MCPEngine(skill_loader, session_manager, metadata_store, invocation_logger)
+    # Initialize Code Interpreter if enabled
+    code_interpreter = None
+    if settings.code_interpreter_enabled:
+        from app.services.code_interpreter import CodeInterpreterService
+
+        code_interpreter = CodeInterpreterService(
+            region=settings.aws_region,
+            code_interpreter_id=settings.code_interpreter_id,
+            default_timeout=settings.code_interpreter_default_timeout,
+            session_timeout=settings.code_interpreter_session_timeout,
+            s3_bucket=settings.code_interpreter_s3_bucket,
+            s3_prefix=settings.code_interpreter_s3_prefix,
+        )
+        logger.info("Code Interpreter service initialized")
+
+    mcp_engine = MCPEngine(
+        skill_loader,
+        session_manager,
+        metadata_store,
+        invocation_logger,
+        code_interpreter,
+    )
 
     # Set global instances for dependency injection
     set_skill_loader(skill_loader)
@@ -85,15 +107,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("No skills in S3 yet, loading from local directory")
 
     logger.info(f"Loading Claude Skills from: {skills_path}")
-    count = await skill_loader.load_from_directory(skills_path)
-    logger.info(f"Loaded {count} Claude Skills")
+    count = await skill_loader.load_from_directory(skills_path, lazy=True)
+    logger.info(f"Registered {count} Claude Skills (lazy loading enabled)")
 
-    # Restore invocation counts from DynamoDB
+    # Restore invocation counts from DynamoDB (covers lazy-loaded skills too)
     if metadata_store:
-        for skill_id, skill in skill_loader.skills.items():
+        for skill_id in skill_loader.all_skill_ids:
             meta = await metadata_store.get_skill(skill_id)
             if meta:
-                skill.invocation_count = meta.get("invocation_count", 0)
+                skill = await skill_loader.get_skill(skill_id)
+                if skill:
+                    skill.invocation_count = meta.get("invocation_count", 0)
+                    if meta.get("last_invoked_at"):
+                        from datetime import datetime
+                        try:
+                            skill.last_invoked_at = datetime.fromisoformat(meta["last_invoked_at"])
+                        except (ValueError, TypeError):
+                            pass
 
     # Start file watcher if enabled
     watcher_task = None
@@ -114,6 +144,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await watcher_task
         except asyncio.CancelledError:
             pass
+
+    # Cleanup Code Interpreter
+    if code_interpreter:
+        await code_interpreter.cleanup()
+        logger.info("Code Interpreter cleaned up")
 
     await session_manager.stop()
     logger.info("Shutdown complete")
@@ -158,7 +193,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],  # Configure appropriately for production
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["Mcp-Session-Id"],
@@ -168,6 +203,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(mcp_router)
     app.include_router(admin_router)
+    app.include_router(playground_router)
 
     return app
 

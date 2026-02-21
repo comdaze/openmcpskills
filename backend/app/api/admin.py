@@ -8,12 +8,14 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.api.deps import get_skill_loader
+from app.api.deps import get_skill_loader, get_s3_store
 from app.core.config import get_settings
 from app.models.skill import Skill, SkillManifest, SkillMetadata, SkillStatus
 from app.services.skill_loader import SkillLoader
+from app.services.s3_store import S3SkillStore
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,7 @@ class SkillManifestResponse(BaseModel):
     metadata: SkillMetadataResponse
     allowed_tools: list[str]
     user_invocable: bool
+    execution: dict[str, Any] | None = None
 
 
 class SkillResponse(BaseModel):
@@ -93,6 +96,7 @@ def skill_to_response(skill: Skill) -> SkillResponse:
             ),
             allowed_tools=skill.manifest.allowed_tools,
             user_invocable=skill.manifest.user_invocable,
+            execution=skill.manifest.execution.model_dump() if skill.manifest.execution else None,
         ),
         status=skill.status,
         source_path=skill.source_path,
@@ -109,11 +113,16 @@ def skill_to_response(skill: Skill) -> SkillResponse:
 async def list_skills(
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
 ) -> SkillListResponse:
-    """List all Claude Skills."""
-    skills = skill_loader.skills
+    """List all Claude Skills (including lazy-loaded ones)."""
+    # Ensure all registered skills are loaded so we can return full metadata
+    all_skills = []
+    for skill_id in skill_loader.all_skill_ids:
+        skill = await skill_loader.get_skill(skill_id)
+        if skill:
+            all_skills.append(skill)
     return SkillListResponse(
-        skills=[skill_to_response(s) for s in skills.values()],
-        total=len(skills),
+        skills=[skill_to_response(s) for s in all_skills],
+        total=len(all_skills),
     )
 
 
@@ -123,7 +132,7 @@ async def get_skill(
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
 ) -> SkillResponse:
     """Get a skill by ID."""
-    skill = skill_loader.get_skill(skill_id)
+    skill = await skill_loader.get_skill(skill_id)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill not found: {skill_id}")
 
@@ -136,7 +145,7 @@ async def get_skill_instructions(
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
 ) -> SkillInstructionsResponse:
     """Get the full instructions for a skill."""
-    skill = skill_loader.get_skill(skill_id)
+    skill = await skill_loader.get_skill(skill_id)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill not found: {skill_id}")
 
@@ -151,9 +160,13 @@ async def get_skill_instructions(
 async def reload_skill(
     skill_id: str,
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    s3_store: Annotated[S3SkillStore, Depends(get_s3_store)],
 ) -> SkillResponse:
-    """Reload a skill (hot reload)."""
-    skill = await skill_loader.reload_skill(skill_id)
+    """Reload a skill (hot reload).
+    
+    If using S3 storage, downloads the latest version from S3 before reloading.
+    """
+    skill = await skill_loader.reload_skill(skill_id, s3_store=s3_store)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill not found: {skill_id}")
 
@@ -495,3 +508,126 @@ async def import_from_github(
                 errors.append({"skill": skill_name, "error": str(e)[:100]})
 
     return {"imported": imported, "count": len(imported), "errors": errors}
+
+
+@router.get("/files/download")
+async def download_file(s3_key: str):
+    """Generate a presigned URL for downloading a file from S3.
+
+    Args:
+        s3_key: S3 object key (e.g. output_artifacts/pptx-generator/1739621438_file.pptx)
+
+    Returns:
+        Presigned URL valid for 1 hour
+    """
+    settings = get_settings()
+    bucket = settings.code_interpreter_s3_bucket
+    if not bucket:
+        raise HTTPException(status_code=500, detail="S3 bucket not configured")
+
+    # Validate key is under output_artifacts prefix
+    if not s3_key.startswith(settings.code_interpreter_s3_prefix):
+        raise HTTPException(status_code=403, detail="Access denied: invalid path")
+
+    import boto3
+    from botocore.config import Config as BotoConfig
+    s3_kwargs: dict = {
+        "region_name": settings.aws_region,
+        "config": BotoConfig(signature_version="s3v4"),
+    }
+    if settings.aws_access_key_id and settings.aws_secret_access_key:
+        s3_kwargs["aws_access_key_id"] = settings.aws_access_key_id
+        s3_kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
+    s3 = boto3.client("s3", **s3_kwargs)
+    try:
+        # Check file exists
+        s3.head_object(Bucket=bucket, Key=s3_key)
+    except Exception:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    url = s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": s3_key},
+        ExpiresIn=3600,
+    )
+    filename = s3_key.rsplit("/", 1)[-1]
+    # Strip timestamp prefix (e.g. "1739621438_file.pptx" -> "file.pptx")
+    if "_" in filename and filename.split("_", 1)[0].isdigit():
+        filename = filename.split("_", 1)[1]
+
+    return {"download_url": url, "filename": filename, "expires_in": 3600}
+
+
+@router.get("/files/stream")
+async def stream_file(s3_key: str):
+    """Stream a file from S3 directly through the backend.
+
+    This avoids presigned URL issues with temporary STS credentials
+    by proxying the download through the backend.
+
+    Args:
+        s3_key: S3 object key (e.g. output_artifacts/pptx-generator/1739621438_file.pptx)
+    """
+    settings = get_settings()
+    bucket = settings.code_interpreter_s3_bucket
+    if not bucket:
+        raise HTTPException(status_code=500, detail="S3 bucket not configured")
+
+    # Validate key is under output_artifacts prefix
+    if not s3_key.startswith(settings.code_interpreter_s3_prefix):
+        raise HTTPException(status_code=403, detail="Access denied: invalid path")
+
+    import boto3
+    from botocore.config import Config as BotoConfig
+    s3_kwargs: dict = {
+        "region_name": settings.aws_region,
+        "config": BotoConfig(signature_version="s3v4"),
+    }
+    if settings.aws_access_key_id and settings.aws_secret_access_key:
+        s3_kwargs["aws_access_key_id"] = settings.aws_access_key_id
+        s3_kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
+    s3 = boto3.client("s3", **s3_kwargs)
+
+    from botocore.exceptions import ClientError
+    try:
+        response = s3.get_object(Bucket=bucket, Key=s3_key)
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code in ("NoSuchKey", "404"):
+            raise HTTPException(status_code=404, detail="File not found")
+        logger.error(f"S3 get_object failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve file")
+    except Exception as e:
+        logger.error(f"S3 get_object failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve file")
+
+    # Determine filename for Content-Disposition
+    filename = s3_key.rsplit("/", 1)[-1]
+    if "_" in filename and filename.split("_", 1)[0].isdigit():
+        filename = filename.split("_", 1)[1]
+
+    content_type = response.get("ContentType", "application/octet-stream")
+    content_length = response.get("ContentLength")
+
+    # RFC 5987: use filename* with UTF-8 encoding for non-ASCII filenames
+    from urllib.parse import quote
+    ascii_filename = filename.encode("ascii", "replace").decode("ascii")
+    headers = {
+        "Content-Disposition": (
+            f"attachment; filename=\"{ascii_filename}\"; "
+            f"filename*=UTF-8''{quote(filename)}"
+        ),
+    }
+    if content_length:
+        headers["Content-Length"] = str(content_length)
+
+    def stream_body():
+        body = response["Body"]
+        while chunk := body.read(64 * 1024):
+            yield chunk
+
+    return StreamingResponse(
+        stream_body(),
+        media_type=content_type,
+        headers=headers,
+    )
