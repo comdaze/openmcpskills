@@ -357,15 +357,14 @@ class MCPEngine:
                 lang_label = "Python"
                 lang_note = ""
 
-            code_context += "\n## IMPORTANT: How to Execute Your Code\n\n"
-            code_context += "After reading these instructions, you MUST:\n"
-            code_context += f"1. Write complete, executable {lang_label} code based on the instructions above.\n"
-            code_context += f'2. Call the `execute-code` tool with these parameters:\n'
-            code_context += f'   - `skill`: "{tool_name}"\n'
-            code_context += f'   - `code`: Your complete {lang_label} code as a string\n'
-            code_context += f'   - `language`: "{runtime}"\n'
-            code_context += f"\nDo NOT call `execute-code` without the `code` parameter. "
-            code_context += f"The `code` parameter must contain the full {lang_label} source code to execute.\n"
+            code_context += "\n## How to Execute Code\n\n"
+            code_context += "Some tasks (e.g. creating new files from scratch) require generating and executing code. "
+            code_context += "Other tasks (e.g. editing existing files, reading content) may only require following the "
+            code_context += "instructions above using your own tools (Bash, Edit, etc.) without the sandbox.\n\n"
+            code_context += f"**When you need to run {lang_label} code in the sandbox**, call the `execute-code` tool with:\n"
+            code_context += f'- `skill`: "{tool_name}"\n'
+            code_context += f'- `code`: Your complete {lang_label} source code\n'
+            code_context += f'- `language`: "{runtime}"\n'
             code_context += "\nAny files your code creates will be automatically uploaded to S3 and download links will be provided to the user.\n"
             code_context += lang_note
             
