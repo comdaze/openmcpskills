@@ -107,9 +107,11 @@ class CodeInterpreterService:
     @property
     def client(self):
         if self._client is None:
+            from botocore.config import Config
             self._client = boto3.client(
                 "bedrock-agentcore",
                 region_name=self.region,
+                config=Config(read_timeout=self.default_timeout + 30),
             )
         return self._client
 
@@ -142,21 +144,23 @@ class CodeInterpreterService:
         result = self._run_command(session_id, f"aws s3 cp '{filename}' '{s3_uri}'")
         if result["exit_code"] == 0:
             logger.info(f"Uploaded {filename} to {s3_uri}")
-            # Generate presigned URL for direct download
-            import boto3 as _boto3
-            s3_client = _boto3.client("s3", region_name=self.region)
-            download_url = s3_client.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": self.s3_bucket, "Key": s3_key},
-                ExpiresIn=86400,
-            )
+            # Build download URL via backend streaming proxy to avoid
+            # presigned URL issues with temporary STS credentials on ECS
+            settings = get_settings()
+            from urllib.parse import quote
+            server_url = settings.mcp_server_url
+            # Remove trailing /mcp path to get the base URL
+            if server_url.endswith("/mcp"):
+                base_url = server_url[:-4]
+            else:
+                base_url = server_url.rstrip("/")
+            download_url = f"{base_url}/admin/files/stream?s3_key={quote(s3_key, safe='')}"
             return {
                 "filename": filename,
                 "s3_uri": s3_uri,
                 "s3_bucket": self.s3_bucket,
                 "s3_key": s3_key,
                 "download_url": download_url,
-                "expires_in": 86400,
             }
         else:
             logger.error(f"S3 upload failed: {result['stderr']}")
@@ -307,61 +311,85 @@ class CodeInterpreterService:
         timeout: int = 300,
         network_mode: str = "sandbox",
         dependencies: list[str] | None = None,
+        runtime: str = "python",
     ) -> ExecutionResult:
-        """Execute skill script in sandbox, then upload generated files to S3."""
+        """Execute skill script in sandbox, then upload generated files to S3.
+
+        For Python: writes script to sandbox, installs pip deps, runs via shell.
+        For JavaScript: executes code directly via executeCode API (Deno runtime).
+            Dependencies should use npm: specifiers in the code itself
+            (e.g. ``import pptxgenjs from "npm:pptxgenjs"``).
+        """
+        is_js = runtime == "javascript"
         session_id = None
         try:
             session_id = await self._start_session()
 
-            # Install deps if needed
-            if dependencies:
-                deps_str = " ".join(dependencies)
-                self._run_command(session_id, f"pip install -q {deps_str}")
+            if is_js:
+                # JavaScript: execute via executeCode API (Deno runtime).
+                # Deno resolves npm: specifiers at runtime, so pip-style
+                # dependency installation is not needed.
+                script_with_args = (
+                    f"const SKILL_ARGUMENTS = {json.dumps(arguments)};\n\n"
+                    f"{script_content}"
+                )
+                result = await self._execute_in_session(
+                    session_id, script_with_args, "javascript", timeout,
+                )
+            else:
+                # Python: install deps, write file, run via shell command.
+                if dependencies:
+                    deps_str = " ".join(dependencies)
+                    self._run_command(session_id, f"pip install -q {deps_str}")
 
-            # Write script to sandbox
-            script_with_args = f"SKILL_ARGUMENTS = {json.dumps(arguments)}\n\n{script_content}"
-            entry = script_path or "main.py"
-            self._write_file_via_command(session_id, entry, script_with_args)
+                script_with_args = f"SKILL_ARGUMENTS = {json.dumps(arguments)}\n\n{script_content}"
+                entry = script_path or "main.py"
+                self._write_file_via_command(session_id, entry, script_with_args)
 
-            # Execute script
-            start_time = time.monotonic()
-            entry = script_path or "main.py"
-            cmd_result = self._run_command(session_id, f"python {entry}")
-            duration_ms = int((time.monotonic() - start_time) * 1000)
+                start_time = time.monotonic()
+                cmd_result = self._run_command(session_id, f"python {entry}")
+                duration_ms = int((time.monotonic() - start_time) * 1000)
 
-            status = ExecutionStatus.SUCCESS if cmd_result["exit_code"] == 0 else ExecutionStatus.ERROR
+                result = ExecutionResult(
+                    status=ExecutionStatus.SUCCESS if cmd_result["exit_code"] == 0 else ExecutionStatus.ERROR,
+                    exit_code=cmd_result["exit_code"],
+                    stdout=cmd_result["stdout"],
+                    stderr=cmd_result["stderr"],
+                    duration_ms=duration_ms,
+                )
 
-            # Find and upload generated files to S3
-            uploaded_files = []
-            if status == ExecutionStatus.SUCCESS and self.s3_bucket:
-                # List files that were created (exclude the script itself)
-                ls_result = self._run_command(session_id, f"find . -maxdepth 1 -type f ! -name '{entry}' -printf '%f\\n'")
+            # Upload generated files to S3
+            if result.status == ExecutionStatus.SUCCESS and self.s3_bucket:
+                uploaded_files = []
+                ls_result = self._run_command(
+                    session_id,
+                    "find . /tmp -maxdepth 1 -type f -not -name '.*' 2>/dev/null",
+                )
                 if ls_result["exit_code"] == 0:
-                    for fname in ls_result["stdout"].strip().split("\n"):
-                        fname = fname.strip()
-                        if not fname or fname.startswith(".") or fname == entry:
+                    seen = set()
+                    for fpath in ls_result["stdout"].strip().split("\n"):
+                        fpath = fpath.strip()
+                        if not fpath:
                             continue
+                        fname = fpath.split("/")[-1]
                         ext = ("." + fname.rsplit(".", 1)[1]).lower() if "." in fname else ""
+                        if fname.startswith(".") or fname in seen:
+                            continue
                         if ext not in self.OUTPUT_EXTENSIONS:
                             logger.debug(f"Skipping non-output file: {fname}")
                             continue
-                        s3_info = self._upload_to_s3(session_id, fname, skill_id)
+                        seen.add(fname)
+                        s3_info = self._upload_to_s3(session_id, fpath, skill_id)
                         if s3_info:
-                            uploaded_files.append({**s3_info, "filename": fname})
+                            s3_info["filename"] = fname
+                            uploaded_files.append(s3_info)
+                result.output_files = uploaded_files
 
             logger.info(
-                f"Skill {skill_id}: status={status.value}, "
-                f"duration={duration_ms}ms, uploaded={len(uploaded_files)} files"
+                f"Skill {skill_id}: status={result.status.value}, "
+                f"duration={result.duration_ms}ms, uploaded={len(result.output_files)} files"
             )
-
-            return ExecutionResult(
-                status=status,
-                exit_code=cmd_result["exit_code"],
-                stdout=cmd_result["stdout"],
-                stderr=cmd_result["stderr"],
-                duration_ms=duration_ms,
-                output_files=uploaded_files,
-            )
+            return result
 
         except Exception as e:
             logger.exception(f"Skill execution failed: {e}")

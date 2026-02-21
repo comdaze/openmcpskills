@@ -3,7 +3,7 @@
 ## Setup & Basic Structure
 
 ```javascript
-const pptxgen = require("pptxgenjs");
+import pptxgen from "npm:pptxgenjs";
 
 let pres = new pptxgen();
 pres.layout = 'LAYOUT_16x9';  // or 'LAYOUT_16x10', 'LAYOUT_4x3', 'LAYOUT_WIDE'
@@ -13,7 +13,7 @@ pres.title = 'Presentation Title';
 let slide = pres.addSlide();
 slide.addText("Hello World!", { x: 0.5, y: 0.5, fontSize: 36, color: "363636" });
 
-pres.writeFile({ fileName: "Presentation.pptx" });
+await pres.writeFile({ fileName: "Presentation.pptx" });
 ```
 
 ## Layout Dimensions
@@ -202,10 +202,10 @@ Use react-icons to generate SVG icons, then rasterize to PNG for universal compa
 ### Setup
 
 ```javascript
-const React = require("react");
-const ReactDOMServer = require("react-dom/server");
-const sharp = require("sharp");
-const { FaCheckCircle, FaChartLine } = require("react-icons/fa");
+import React from "npm:react";
+import ReactDOMServer from "npm:react-dom/server";
+import sharp from "npm:sharp";
+import { FaCheckCircle, FaChartLine } from "npm:react-icons/fa";
 
 function renderIconSvg(IconComponent, color = "#000000", size = 256) {
   return ReactDOMServer.renderToStaticMarkup(
@@ -235,7 +235,7 @@ slide.addImage({
 
 ### Icon Libraries
 
-Install: `npm install -g react-icons react react-dom sharp`
+Import via `npm:` specifiers (resolved automatically by Deno): `react-icons`, `react`, `react-dom`, `sharp`
 
 Popular icon sets in react-icons:
 - `react-icons/fa` - Font Awesome

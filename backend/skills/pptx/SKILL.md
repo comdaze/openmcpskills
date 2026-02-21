@@ -4,14 +4,9 @@ description: "Use this skill any time a .pptx file is involved in any way — as
 license: Proprietary. LICENSE.txt has complete terms
 execution:
   type: code_interpreter
-  runtime: python
-  entrypoint: generate.py
+  runtime: javascript
   timeout: 300
-  network: sandbox
-  dependencies:
-    - python-pptx
-    - markitdown
-    - pillow
+  network: public
 ---
 
 # PPTX Skill
@@ -235,8 +230,6 @@ pdftoppm -jpeg -r 150 -f N -l N output.pdf slide-fixed
 
 ## Dependencies
 
-- `pip install "markitdown[pptx]"` - text extraction
-- `pip install Pillow` - thumbnail grids
-- `npm install -g pptxgenjs` - creating from scratch
+- `import pptxgen from "npm:pptxgenjs"` - creating from scratch (resolved automatically by Deno)
 - LibreOffice (`soffice`) - PDF conversion (auto-configured for sandboxed environments via `scripts/office/soffice.py`)
 - Poppler (`pdftoppm`) - PDF to images

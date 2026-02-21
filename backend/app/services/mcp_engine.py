@@ -241,11 +241,11 @@ class MCPEngine:
             if skill and skill.status == SkillStatus.ACTIVE:
                 tools.append(self._skill_to_tool(skill))
         
-        # Add execute-python-code tool if code interpreter is available
+        # Add execute-code tool if code interpreter is available
         if self._code_interpreter:
             tools.append({
-                "name": "execute-python-code",
-                "description": "Execute Python code in a secure sandbox. Use this after a code_interpreter skill returns instructions and you've generated the code.",
+                "name": "execute-code",
+                "description": "Execute code in a secure sandbox. Use this after a code_interpreter skill returns instructions and you've generated the code. Supports Python and JavaScript (Deno).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -255,7 +255,12 @@ class MCPEngine:
                         },
                         "code": {
                             "type": "string",
-                            "description": "The Python code to execute"
+                            "description": "The complete code to execute"
+                        },
+                        "language": {
+                            "type": "string",
+                            "enum": ["python", "javascript"],
+                            "description": "The programming language (default: python)"
                         }
                     },
                     "required": ["skill", "code"]
@@ -339,7 +344,30 @@ class MCPEngine:
             code_context += f"- Network: {execution_config.network}\n"
             if execution_config.dependencies:
                 code_context += f"- Pre-installed packages: {', '.join(execution_config.dependencies)}\n"
-            code_context += "\n**Important**: Write complete, executable Python code. Any files you create will be automatically uploaded to S3 and download links will be provided to the user.\n"
+            runtime = execution_config.runtime  # "python" or "javascript"
+            if runtime == "javascript":
+                lang_label = "JavaScript"
+                lang_note = (
+                    "\n**Deno runtime notes:**\n"
+                    "- Use ESM imports: `import pptxgen from \"npm:pptxgenjs\";`\n"
+                    "- CommonJS `require()` is NOT supported.\n"
+                    "- Use `Deno.writeFileSync` / `Deno.writeFile` for file I/O.\n"
+                )
+            else:
+                lang_label = "Python"
+                lang_note = ""
+
+            code_context += "\n## IMPORTANT: How to Execute Your Code\n\n"
+            code_context += "After reading these instructions, you MUST:\n"
+            code_context += f"1. Write complete, executable {lang_label} code based on the instructions above.\n"
+            code_context += f'2. Call the `execute-code` tool with these parameters:\n'
+            code_context += f'   - `skill`: "{tool_name}"\n'
+            code_context += f'   - `code`: Your complete {lang_label} code as a string\n'
+            code_context += f'   - `language`: "{runtime}"\n'
+            code_context += f"\nDo NOT call `execute-code` without the `code` parameter. "
+            code_context += f"The `code` parameter must contain the full {lang_label} source code to execute.\n"
+            code_context += "\nAny files your code creates will be automatically uploaded to S3 and download links will be provided to the user.\n"
+            code_context += lang_note
             
             instruction_content += code_context
 
@@ -449,11 +477,12 @@ class MCPEngine:
             if result.stderr:
                 text_parts.append(f"\n⚠️ Errors:\n{result.stderr}")
             if result.output_files:
-                text_parts.append("\n📎 生成的文件:")
+                text_parts.append("\n\n## Generated Files - Download Links")
+                text_parts.append("IMPORTANT: You MUST display the following download links to the user exactly as provided. Do NOT omit, summarize, or paraphrase these URLs.\n")
                 for f in result.output_files:
                     url = f.get("download_url", "")
                     name = f.get("filename", "unknown")
-                    text_parts.append(f"  - {name}: {url}")
+                    text_parts.append(f"[Download {name}]({url})")
             
             return self._success_response(msg_id, {
                 "content": [{
@@ -549,6 +578,7 @@ class MCPEngine:
             timeout=execution.timeout,
             network_mode=execution.network,
             dependencies=execution.dependencies,
+            runtime=execution.runtime,
         )
 
     async def _load_script_content(
