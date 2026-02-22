@@ -59,6 +59,14 @@ class MCPEngine:
         self._server_name = self._settings.app_name
         self._server_version = self._settings.app_version
 
+        # Tools list cache (invalidated when skills change)
+        self._tools_cache: list[dict[str, Any]] | None = None
+        self._skill_loader.add_watcher(self._on_skill_change)
+
+    def _on_skill_change(self, skill_id: str, event_type: str) -> None:
+        """Invalidate tools cache when skills change."""
+        self._tools_cache = None
+
     def get_server_capabilities(self) -> dict[str, Any]:
         """Get server capabilities for initialize response."""
         return {
@@ -203,44 +211,16 @@ class MCPEngine:
             },
         })
 
-    async def _handle_tools_list(
-        self,
-        msg_id: Any,
-        params: dict[str, Any],
-        session_id: str | None,
-    ) -> dict[str, Any]:
-        """Handle tools/list request.
-
-        Returns available Claude Skills as MCP tools.
-        Supports pagination via cursor parameter.
-        """
-        if session_id:
-            await self._session_manager.update_activity(session_id)
-
-        # Get cursor for pagination (optional)
-        cursor = params.get("cursor")
-        
-        # For lazy loading: return lightweight tool list without full content
+    async def _build_tools_cache(self) -> list[dict[str, Any]]:
+        """Build and cache the full tools list."""
         tools = []
-        skill_ids = sorted(self._skill_loader._skill_paths.keys())
-        
-        # Apply cursor-based pagination if provided
-        start_idx = 0
-        if cursor:
-            try:
-                start_idx = skill_ids.index(cursor) + 1
-            except ValueError:
-                pass  # Invalid cursor, start from beginning
-        
-        # Return up to 100 tools per request
-        page_size = 100
-        page_skill_ids = skill_ids[start_idx:start_idx + page_size]
-        
-        for skill_id in page_skill_ids:
+        skill_ids = sorted(self._skill_loader.all_skill_ids)
+
+        for skill_id in skill_ids:
             skill = await self._skill_loader.get_skill(skill_id)
             if skill and skill.status == SkillStatus.ACTIVE:
                 tools.append(self._skill_to_tool(skill))
-        
+
         # Add execute-code tool if code interpreter is available
         if self._code_interpreter:
             tools.append({
@@ -266,13 +246,51 @@ class MCPEngine:
                     "required": ["skill", "code"]
                 }
             })
-        
+
+        self._tools_cache = tools
+        return tools
+
+    async def _handle_tools_list(
+        self,
+        msg_id: Any,
+        params: dict[str, Any],
+        session_id: str | None,
+    ) -> dict[str, Any]:
+        """Handle tools/list request.
+
+        Returns available Claude Skills as MCP tools.
+        Supports pagination via cursor parameter.
+        """
+        if session_id:
+            await self._session_manager.update_activity(session_id)
+
+        # Build or reuse cached tools list
+        all_tools = self._tools_cache
+        if all_tools is None:
+            all_tools = await self._build_tools_cache()
+
+        # Get cursor for pagination (optional)
+        cursor = params.get("cursor")
+
+        # Apply cursor-based pagination if provided
+        start_idx = 0
+        if cursor:
+            # Find tool by name matching cursor
+            for i, tool in enumerate(all_tools):
+                if tool["name"] == cursor:
+                    start_idx = i + 1
+                    break
+
+        # Return up to 100 tools per request
+        page_size = 100
+        tools = all_tools[start_idx:start_idx + page_size]
+
         response_data = {"tools": tools}
-        
+
         # Add nextCursor if there are more results
-        if start_idx + page_size < len(skill_ids):
-            response_data["nextCursor"] = skill_ids[start_idx + page_size - 1]
-        
+        if start_idx + page_size < len(all_tools):
+            response_data["nextCursor"] = all_tools[start_idx + page_size - 1]["name"]
+
         return self._success_response(msg_id, response_data)
 
     async def _handle_tools_call(
@@ -298,8 +316,8 @@ class MCPEngine:
         if session_id:
             await self._session_manager.update_activity(session_id)
 
-        # Handle the special execute-python-code tool
-        if tool_name == "execute-python-code":
+        # Handle the execute-code tool (and legacy execute-python-code)
+        if tool_name in ("execute-code", "execute-python-code"):
             return await self._handle_code_execute(msg_id, {
                 "skill": arguments.get("skill", ""),
                 "code": arguments.get("code", ""),

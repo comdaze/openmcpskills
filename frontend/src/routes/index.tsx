@@ -7,6 +7,7 @@ import { SkillsPage } from '@/pages/skills'
 import { SkillDetailPage } from '@/pages/skill-detail'
 import { UploadPage } from '@/pages/upload'
 import { SettingsPage } from '@/pages/settings'
+import { PlaygroundPage } from '@/pages/playground'
 import { NotFoundPage } from '@/pages/not-found'
 
 export function AppRoutes() {
@@ -24,6 +25,7 @@ export function AppRoutes() {
         <Route path="/skills" element={<SkillsPage />} />
         <Route path="/skills/upload" element={<UploadPage />} />
         <Route path="/skills/:id" element={<SkillDetailPage />} />
+        <Route path="/playground" element={<PlaygroundPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
 

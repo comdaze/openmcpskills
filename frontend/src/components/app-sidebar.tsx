@@ -10,6 +10,7 @@ import {
   Upload,
   Settings,
   Sparkles,
+  FlaskConical,
 } from "lucide-react"
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
@@ -39,6 +40,7 @@ import { useAuth } from "@/hooks/use-auth"
 const navItems = [
   { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
   { title: "Skills", url: "/skills", icon: Boxes },
+  { title: "Playground", url: "/playground", icon: FlaskConical },
   { title: "Upload", url: "/skills/upload", icon: Upload },
   { title: "Settings", url: "/settings", icon: Settings },
 ]
@@ -54,7 +56,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const isAuthenticated = authStatus === 'authenticated' && user
 
   React.useEffect(() => {
-    fetch('/api/info')
+    const apiUrl = import.meta.env.DEV ? '/api/info' : `${import.meta.env.VITE_API_BASE_URL || ''}/info`
+    fetch(apiUrl)
       .then(r => r.json())
       .then(data => setVersion(`v${data.version}`))
       .catch(() => {})

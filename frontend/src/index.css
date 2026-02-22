@@ -93,3 +93,26 @@
 .amplify-tabs__list {
   display: none !important;
 }
+
+/* assistant-ui markdown overrides */
+.aui-markdown pre {
+  @apply bg-slate-900 text-slate-50 rounded-lg overflow-x-auto;
+}
+.aui-markdown code:not(pre code) {
+  @apply bg-muted px-1.5 py-0.5 rounded text-sm font-mono;
+}
+.aui-markdown a {
+  @apply text-primary;
+}
+.aui-markdown a:hover {
+  text-decoration: underline;
+}
+.aui-markdown table {
+  @apply min-w-full border-collapse text-sm;
+}
+.aui-markdown th {
+  @apply border border-border bg-muted px-3 py-2 text-left font-semibold;
+}
+.aui-markdown td {
+  @apply border border-border px-3 py-2;
+}

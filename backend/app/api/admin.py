@@ -348,14 +348,19 @@ async def list_skill_versions(skill_id: str) -> dict[str, Any]:
 
     from app.api.deps import get_s3_store
     s3_store = get_s3_store()
-    versions = await s3_store.list_versions(skill_id)
+    versions = await s3_store.list_versions_with_dates(skill_id)
     return {"skill_id": skill_id, "versions": versions}
+
+
+class RollbackRequest(BaseModel):
+    """Rollback request body."""
+    version: str
 
 
 @router.post("/skills/{skill_id}/rollback")
 async def rollback_skill(
     skill_id: str,
-    version: str,
+    body: RollbackRequest,
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
 ) -> dict[str, str]:
     """Rollback a skill to a specific version (S3 mode only)."""
@@ -367,12 +372,14 @@ async def rollback_skill(
     s3_store = get_s3_store()
     metadata_store = get_metadata_store()
 
+    version = body.version
+
     local_path = await s3_store.download_skill(skill_id, version)
     skill = await skill_loader.load_skill(local_path)
     if not skill:
         raise HTTPException(status_code=500, detail="Failed to load rolled-back skill")
 
-    # Update metadata version
+    # Update DynamoDB metadata version
     meta = await metadata_store.get_skill(skill_id)
     if meta:
         await metadata_store.put_skill(
@@ -382,7 +389,16 @@ async def rollback_skill(
             manifest_json=meta.get("manifest_json", "{}"),
         )
 
-    return {"message": f"Rolled back {skill_id} to {version}"}
+    # Update S3 latest.json so restarts load the correct version
+    import json as _json
+    async with s3_store._session.client("s3", **s3_store._client_kwargs()) as s3:
+        await s3.put_object(
+            Bucket=s3_store._bucket,
+            Key=s3_store._latest_key(skill_id),
+            Body=_json.dumps({"version": version}).encode(),
+        )
+
+    return {"message": f"Rolled back {skill_id} to {version}", "version": version}
 
 
 @router.get("/skills/{skill_id}/logs")

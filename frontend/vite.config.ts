@@ -9,4 +9,16 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  server: {
+    hmr: {
+      clientPort: 5173,
+    },
+    proxy: {
+      '/api': {
+        target: process.env.VITE_API_BASE_URL || 'http://localhost:8000',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+    },
+  },
 })

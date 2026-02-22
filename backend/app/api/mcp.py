@@ -52,18 +52,29 @@ async def mcp_endpoint(
     - Mcp-Session-Id: Optional session ID for session continuity
     - Accept: application/json for single response, text/event-stream for SSE
     """
-    # Handle GET request - return SSE stream for listening
+    # Handle GET request
     if request.method == "GET":
-        # GET must request SSE
+        # If client doesn't request SSE, return server info as JSON (discovery/probe)
         if not accept or CONTENT_TYPE_SSE not in accept:
-            raise HTTPException(status_code=405, detail="GET requires Accept: text/event-stream")
-        
+            return Response(
+                content=json.dumps({
+                    "name": mcp_engine._server_name,
+                    "version": mcp_engine._server_version,
+                    "protocol": "MCP",
+                    "transport": "streamable-http",
+                    "protocolVersions": ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"],
+                }),
+                media_type=CONTENT_TYPE_JSON,
+                headers={"Cache-Control": "no-cache"},
+            )
+
+        # SSE requested - return SSE stream for listening
         # Get or create session
         session_id = mcp_session_id
         if not session_id:
             session = await session_manager.create_session()
             session_id = session.id
-        
+
         # Return SSE stream for server-initiated messages
         return StreamingResponse(
             listen_for_server_messages(mcp_engine, session_id, request),
@@ -93,8 +104,15 @@ async def mcp_endpoint(
     is_batch = isinstance(body, list)
     messages = body if is_batch else [body]
 
-    # Check if client wants SSE streaming
-    wants_streaming = accept and CONTENT_TYPE_SSE in accept
+    # Prefer JSON over SSE for POST responses.
+    # SSE StreamingResponse keeps the connection open after data is sent,
+    # causing clients to wait for a close timeout (15-30s in practice).
+    # Only use SSE if the client exclusively accepts it and not JSON.
+    wants_streaming = (
+        accept
+        and CONTENT_TYPE_SSE in accept
+        and CONTENT_TYPE_JSON not in accept
+    )
 
     # Process all messages first to check if any have responses
     responses = []

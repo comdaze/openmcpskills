@@ -91,6 +91,26 @@ class MetadataStore:
             await ddb.delete_item(TableName=self._table, Key={"skill_id": {"S": skill_id}})
         return True
 
+    async def batch_get_invocation_counts(self, skill_ids: list[str]) -> dict[str, dict]:
+        """Fetch invocation counts for all skills in a single scan.
+
+        Returns a dict mapping skill_id to {invocation_count, last_invoked_at}.
+        Uses a single DynamoDB Scan with projection to minimize data transfer.
+        """
+        wanted = set(skill_ids)
+        results: dict[str, dict] = {}
+        async with self._session.client("dynamodb", **self._client_kwargs()) as ddb:
+            resp = await ddb.scan(
+                TableName=self._table,
+                ProjectionExpression="skill_id, invocation_count, last_invoked_at",
+            )
+            for item in resp.get("Items", []):
+                parsed = self._deserialize(item)
+                sid = parsed.get("skill_id", "")
+                if sid and sid in wanted:
+                    results[sid] = parsed
+        return results
+
     async def increment_invocation(self, skill_id: str) -> None:
         now = datetime.utcnow().isoformat()
         async with self._session.client("dynamodb", **self._client_kwargs()) as ddb:

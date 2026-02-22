@@ -80,6 +80,25 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
 
+    # Playground Configuration
+    mcp_server_url: str = "https://mcp.openmcpskills.click/mcp"
+    bedrock_endpoint: str | None = None
+    bedrock_api_key: str | None = None
+    
+    # Claude Model IDs
+    claude_opus_4_6_model_id: str = "us.anthropic.claude-opus-4-6-v1"
+    claude_opus_model_id: str = "us.anthropic.claude-opus-4-5-20251101-v1:0"
+    claude_sonnet_model_id: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    claude_haiku_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+    # AgentCore Code Interpreter Configuration
+    code_interpreter_enabled: bool = False
+    code_interpreter_id: str = "aws.codeinterpreter.v1"
+    code_interpreter_default_timeout: int = 300
+    code_interpreter_session_timeout: int = 900
+    code_interpreter_s3_bucket: str = ""
+    code_interpreter_s3_prefix: str = "output_artifacts/"
+
     @property
     def skills_path(self) -> Path:
         """Get absolute path to skills directory."""

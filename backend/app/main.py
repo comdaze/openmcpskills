@@ -110,20 +110,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     count = await skill_loader.load_from_directory(skills_path, lazy=True)
     logger.info(f"Registered {count} Claude Skills (lazy loading enabled)")
 
-    # Restore invocation counts from DynamoDB (covers lazy-loaded skills too)
+    # Restore invocation counts from DynamoDB via batch read.
+    # Counts are stored as pending and applied lazily when skills are first accessed.
     if metadata_store:
-        for skill_id in skill_loader.all_skill_ids:
-            meta = await metadata_store.get_skill(skill_id)
-            if meta:
-                skill = await skill_loader.get_skill(skill_id)
-                if skill:
-                    skill.invocation_count = meta.get("invocation_count", 0)
-                    if meta.get("last_invoked_at"):
-                        from datetime import datetime
-                        try:
-                            skill.last_invoked_at = datetime.fromisoformat(meta["last_invoked_at"])
-                        except (ValueError, TypeError):
-                            pass
+        all_ids = skill_loader.all_skill_ids
+        counts = await metadata_store.batch_get_invocation_counts(all_ids)
+        skill_loader.set_pending_counts(counts)
+        logger.info(f"Loaded invocation counts for {len(counts)} skills from DynamoDB")
+
+    # Pre-warm: eagerly load all skills and build tools cache so the
+    # first tools/list request doesn't pay the lazy-loading cost.
+    import time as _time
+    _warm_start = _time.monotonic()
+    for sid in skill_loader.all_skill_ids:
+        await skill_loader.get_skill(sid)
+    await mcp_engine._build_tools_cache()
+    logger.info(
+        f"Pre-warmed {len(skill_loader.skills)} skills + tools cache "
+        f"in {(_time.monotonic() - _warm_start) * 1000:.0f}ms"
+    )
 
     # Start file watcher if enabled
     watcher_task = None

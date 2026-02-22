@@ -278,7 +278,7 @@ async def chat(request: ChatRequest):
                 logger.info(f"Loaded {len(tools)} tools from MCP server")
 
         # Invoke model (may need multiple rounds for tool use)
-        max_iterations = 5
+        max_iterations = 15
         all_tool_calls = []
         
         for iteration in range(max_iterations):
@@ -409,7 +409,7 @@ async def chat_websocket(websocket: WebSocket):
                 await websocket.send_json({"type": "status", "message": f"Loaded {len(tools)} tools"})
 
         # Invoke model (may need multiple rounds for tool use)
-        max_iterations = 5
+        max_iterations = 15
         all_tool_calls = []
 
         for iteration in range(max_iterations):

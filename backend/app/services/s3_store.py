@@ -94,12 +94,37 @@ class S3SkillStore:
                     versions.append(v)
         return sorted(versions)
 
+    async def list_versions_with_dates(self, skill_id: str) -> list[dict]:
+        """List all versions of a skill with published timestamps."""
+        prefix = f"{self._settings.s3_skills_prefix}{skill_id}/"
+        versions: list[dict] = []
+        async with self._session.client("s3", **self._client_kwargs()) as s3:
+            resp = await s3.list_objects_v2(Bucket=self._bucket, Prefix=prefix, Delimiter="/")
+            for cp in resp.get("CommonPrefixes", []):
+                v = cp["Prefix"][len(prefix):].rstrip("/")
+                if not v.startswith("v"):
+                    continue
+                # Get the LastModified of any file in this version to determine publish date
+                v_resp = await s3.list_objects_v2(
+                    Bucket=self._bucket, Prefix=cp["Prefix"], MaxKeys=1,
+                )
+                published_at = ""
+                for obj in v_resp.get("Contents", []):
+                    published_at = obj["LastModified"].isoformat()
+                versions.append({
+                    "skill_id": skill_id,
+                    "version": v,
+                    "published_at": published_at,
+                })
+        return sorted(versions, key=lambda x: x["version"])
+
     async def sync_all_to_local(self) -> int:
         """Download all latest skills to local cache. Returns count."""
+        import asyncio
+
         cache_dir = self._settings.skill_cache_dir
         cache_dir.mkdir(parents=True, exist_ok=True)
         prefix = self._settings.s3_skills_prefix
-        count = 0
 
         async with self._session.client("s3", **self._client_kwargs()) as s3:
             # List skill directories
@@ -116,12 +141,22 @@ class S3SkillStore:
                 return 0
 
         logger.info(f"Found {len(skill_ids)} skills in S3: {skill_ids}")
-        for sid in skill_ids:
-            try:
-                await self.download_skill(sid)
-                count += 1
-            except Exception as e:
-                logger.error(f"Failed to sync skill {sid}: {e}")
+
+        # Download skills concurrently (up to 10 at a time)
+        sem = asyncio.Semaphore(10)
+        results: list[bool] = []
+
+        async def _download(sid: str) -> bool:
+            async with sem:
+                try:
+                    await self.download_skill(sid)
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to sync skill {sid}: {e}")
+                    return False
+
+        results = await asyncio.gather(*[_download(sid) for sid in skill_ids])
+        count = sum(1 for r in results if r)
 
         logger.info(f"Synced {count} skills from S3 to {cache_dir}")
         return count

@@ -28,6 +28,7 @@ dependencies = [
     "aiofiles>=23.2.0",
     "pyyaml>=6.0.1",
     "watchfiles>=0.21.0",
+    "bedrock-agentcore>=0.1.0",
 ]
 
 [project.optional-dependencies]

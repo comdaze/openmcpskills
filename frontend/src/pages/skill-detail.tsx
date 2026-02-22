@@ -47,6 +47,12 @@ export function SkillDetailPage() {
     }
   }, [id, getSkillLogs, getSkillVersions])
 
+  const handleRollback = async (version: string) => {
+    if (!id) return
+    await rollbackSkill(id, version)
+    getSkillVersions(id).then(setVersions)
+  }
+
   if (!skill) return <div className="p-8">Skill not found</div>
 
   return (
@@ -242,19 +248,25 @@ export function SkillDetailPage() {
                 <TableBody>
                   {versions.length === 0 ? (
                     <TableRow><TableCell colSpan={3} className="text-center text-muted-foreground">No versions</TableCell></TableRow>
-                  ) : versions.map(v => (
+                  ) : versions.map(v => {
+                    const isCurrent = v.version === skillVersion
+                    return (
                     <TableRow key={v.version}>
-                      <TableCell className="font-medium">{v.version}</TableCell>
+                      <TableCell className="font-medium">
+                        {v.version}
+                        {isCurrent && <Badge variant="default" className="ml-2">Current</Badge>}
+                      </TableCell>
                       <TableCell>{v.published_at ? new Date(v.published_at).toLocaleString() : '-'}</TableCell>
                       <TableCell>
-                        {v.version !== `v${skill.version}` && v.version !== skill.version && (
-                          <Button variant="outline" size="sm" onClick={() => rollbackSkill(skill.id, v.version)}>
+                        {!isCurrent && (
+                          <Button variant="outline" size="sm" onClick={() => handleRollback(v.version)}>
                             Rollback
                           </Button>
                         )}
                       </TableCell>
                     </TableRow>
-                  ))}
+                    )
+                  })}
                 </TableBody>
               </Table>
             </CardContent>

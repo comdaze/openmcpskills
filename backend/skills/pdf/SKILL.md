@@ -179,6 +179,122 @@ story.append(Paragraph("Content for page 2", styles['Normal']))
 doc.build(story)
 ```
 
+#### Chinese, Japanese, Korean (CJK) Text Support
+
+**IMPORTANT**: The default ReportLab fonts (Helvetica, Times-Roman, Courier) do NOT support Chinese, Japanese, or Korean characters. They will render as "I" or blank glyphs. You MUST register a CJK font before using any CJK text.
+
+**When to use**: Whenever the user's content, prompt, or requested output language contains Chinese, Japanese, or Korean characters, you MUST use CJK fonts for all text that may contain these characters.
+
+##### Method 1: CID Fonts (Recommended — no font file needed)
+
+ReportLab includes built-in CID font support. Register the appropriate font before use:
+
+```python
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+
+# Simplified Chinese
+pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
+
+# Traditional Chinese
+# pdfmetrics.registerFont(UnicodeCIDFont('MSung-Light'))
+
+# Japanese
+# pdfmetrics.registerFont(UnicodeCIDFont('HeiseiMin-W3'))
+
+# Korean
+# pdfmetrics.registerFont(UnicodeCIDFont('HYSMyeongJo-Medium'))
+```
+
+Canvas example:
+```python
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+
+pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
+
+c = canvas.Canvas("/tmp/chinese.pdf", pagesize=A4)
+width, height = A4
+
+c.setFont('STSong-Light', 16)
+c.drawString(72, height - 72, "你好世界 — Hello World")
+c.save()
+```
+
+Platypus (SimpleDocTemplate / Paragraph) example:
+```python
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+
+pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
+
+styles = getSampleStyleSheet()
+
+# Create CJK-capable styles — one for each style you need
+cn_title = ParagraphStyle('CNTitle', parent=styles['Title'], fontName='STSong-Light')
+cn_body = ParagraphStyle('CNBody', parent=styles['Normal'], fontName='STSong-Light', fontSize=12, leading=18)
+cn_heading = ParagraphStyle('CNHeading', parent=styles['Heading1'], fontName='STSong-Light')
+
+doc = SimpleDocTemplate("/tmp/report.pdf", pagesize=A4)
+story = []
+story.append(Paragraph("项目报告", cn_title))
+story.append(Spacer(1, 12))
+story.append(Paragraph("第一章 概述", cn_heading))
+story.append(Paragraph("这是一份使用 ReportLab 生成的中文 PDF 文档。", cn_body))
+doc.build(story)
+```
+
+##### Method 2: TTF Font Embedding (for richer typography)
+
+Download a free CJK font and embed it for better rendering:
+
+```python
+import urllib.request
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+# Download Noto Sans SC (Simplified Chinese) — ~8MB
+urllib.request.urlretrieve(
+    "https://github.com/google/fonts/raw/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf",
+    "/tmp/NotoSansSC.ttf"
+)
+pdfmetrics.registerFont(TTFont('NotoSansSC', '/tmp/NotoSansSC.ttf'))
+
+# Then use 'NotoSansSC' as fontName in styles and canvas
+```
+
+Note: Method 2 requires network access and adds download time. Use Method 1 (CID fonts) unless you need specific font styles.
+
+##### Table with CJK Text
+
+When using Tables with CJK text, set the font in TableStyle:
+
+```python
+from reportlab.platypus import Table, TableStyle
+from reportlab.lib import colors
+
+data = [
+    ['项目', '数量', '单价', '合计'],
+    ['产品A', '10', '¥50', '¥500'],
+    ['产品B', '5', '¥100', '¥500'],
+]
+
+table = Table(data)
+table.setStyle(TableStyle([
+    ('FONTNAME', (0, 0), (-1, -1), 'STSong-Light'),  # CJK font for all cells
+    ('FONTNAME', (0, 0), (-1, 0), 'STSong-Light'),   # Header row
+    ('FONTSIZE', (0, 0), (-1, 0), 12),
+    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+]))
+```
+
 #### Subscripts and Superscripts
 
 **IMPORTANT**: Never use Unicode subscript/superscript characters (₀₁₂₃₄₅₆₇₈₉, ⁰¹²³⁴⁵⁶⁷⁸⁹) in ReportLab PDFs. The built-in fonts do not include these glyphs, causing them to render as solid black boxes.

@@ -40,9 +40,6 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy application code (from backend/app relative to build context)
 COPY backend/app ./app
 
-# Copy skills directory (from skills/ relative to build context)
-COPY skills ./skills
-
 # Set ownership
 RUN chown -R mcpuser:mcpuser /app
 
@@ -63,5 +60,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the application
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the application with 2 workers for better concurrency
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

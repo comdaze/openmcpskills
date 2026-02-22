@@ -50,6 +50,16 @@ class SkillLoader:
         self._load_lock = asyncio.Lock()
         self._settings = get_settings()
         self._watchers: list[Callable[[str, str], None]] = []
+        # Pending invocation counts to apply when skills are lazily loaded
+        self._pending_counts: dict[str, dict] = {}  # skill_id -> {invocation_count, last_invoked_at}
+
+    def set_pending_counts(self, counts: dict[str, dict]) -> None:
+        """Store invocation counts to apply when skills are lazily loaded."""
+        self._pending_counts = counts
+        # Apply to already-loaded skills immediately
+        for skill_id, meta in counts.items():
+            if skill_id in self._skills:
+                self._apply_counts(self._skills[skill_id], meta)
 
     @property
     def skills(self) -> dict[str, Skill]:
@@ -87,6 +97,17 @@ class SkillLoader:
         'loaded', 'unloaded', 'updated', or 'error'.
         """
         self._watchers.append(callback)
+
+    @staticmethod
+    def _apply_counts(skill: Skill, meta: dict) -> None:
+        """Apply invocation counts from metadata to a skill."""
+        from datetime import datetime
+        skill.invocation_count = meta.get("invocation_count", 0)
+        if meta.get("last_invoked_at"):
+            try:
+                skill.last_invoked_at = datetime.fromisoformat(meta["last_invoked_at"])
+            except (ValueError, TypeError):
+                pass
 
     def _notify_watchers(self, skill_id: str, event_type: str) -> None:
         """Notify all watchers of a skill change."""
@@ -181,6 +202,10 @@ class SkillLoader:
             skill.script_files = self._discover_files(skill_path / SCRIPTS_DIR)
             skill.reference_files = self._discover_files(skill_path / REFERENCES_DIR)
             skill.asset_files = self._discover_files(skill_path / ASSETS_DIR)
+
+            # Apply pending invocation counts if available
+            if skill_id in self._pending_counts:
+                self._apply_counts(skill, self._pending_counts.pop(skill_id))
 
             # Store skill
             old_skill = self._skills.get(skill_id)

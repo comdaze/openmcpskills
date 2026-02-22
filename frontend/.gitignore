@@ -25,3 +25,10 @@ dist-ssr
 
 # AWS specific files
 amplify_outputs.json
+
+aidlc-docs
+.kiro
+.claude
+.env
+.venv
+.env.deploy

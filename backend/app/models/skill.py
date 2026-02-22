@@ -37,6 +37,40 @@ class SkillMetadata(BaseModel):
     extra: dict[str, str] = Field(default_factory=dict, description="Additional key-value pairs")
 
 
+class SkillExecution(BaseModel):
+    """Skill execution configuration.
+    
+    Defines how a skill should be executed:
+    - instruction: Returns instructions for the AI to follow (default)
+    - code_interpreter: Executes code in AgentCore sandbox
+    """
+
+    type: str = Field(
+        default="instruction",
+        description="Execution type: instruction (default) or code_interpreter"
+    )
+    runtime: str = Field(
+        default="python",
+        description="Runtime environment: python or javascript"
+    )
+    entrypoint: str | None = Field(
+        default=None,
+        description="Entry script path (relative to scripts/ directory)"
+    )
+    timeout: int = Field(
+        default=300,
+        description="Execution timeout in seconds"
+    )
+    network: str = Field(
+        default="sandbox",
+        description="Network mode: sandbox (no network) or public"
+    )
+    dependencies: list[str] = Field(
+        default_factory=list,
+        description="Python/npm dependencies to install"
+    )
+
+
 class SkillManifest(BaseModel):
     """Skill manifest following Claude Skills standard.
 
@@ -103,6 +137,12 @@ class SkillManifest(BaseModel):
     hooks: list[SkillHook] = Field(
         default_factory=list,
         description="Lifecycle hooks"
+    )
+
+    # Execution configuration (for code_interpreter support)
+    execution: SkillExecution = Field(
+        default_factory=SkillExecution,
+        description="Execution configuration"
     )
 
     # Instructions (from SKILL.md body)
