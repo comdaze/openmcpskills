@@ -54,6 +54,7 @@ interface SkillsState {
   getSkillLogs: (id: string) => Promise<InvocationLog[]>
   getSkillVersions: (id: string) => Promise<SkillVersion[]>
   rollbackSkill: (id: string, version: string) => Promise<void>
+  generateSkill: (sourceUrl: string, sourceType: string, skillName: string, description: string) => Promise<void>
 }
 
 // Mock data for development
@@ -123,6 +124,24 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
 
   rollbackSkill: async (id, version) => {
     await apiFetch(`/admin/skills/${id}/rollback`, { method: 'POST', body: JSON.stringify({ version }) })
+    await get().fetchSkills()
+  },
+
+  generateSkill: async (sourceUrl, sourceType, skillName, description) => {
+    const res = await fetch(`${API_BASE_URL}/admin/skills/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_url: sourceUrl,
+        source_type: sourceType,
+        skill_name: skillName,
+        description,
+      }),
+    })
+    if (!res.ok) {
+      const data = await res.json()
+      throw new Error(data.detail || 'Generation failed')
+    }
     await get().fetchSkills()
   },
 }))

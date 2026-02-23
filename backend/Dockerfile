@@ -17,7 +17,7 @@ COPY backend/pyproject.toml backend/README.md ./
 
 # Install dependencies
 RUN pip install --no-cache-dir build && \
-    pip install --no-cache-dir .
+    pip install --no-cache-dir ".[seekers]"
 
 # Stage 2: Runtime
 FROM python:3.11-slim AS runtime

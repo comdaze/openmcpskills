@@ -1,16 +1,16 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useSkillsStore } from '@/store/skills-store'
-import { Upload, CheckCircle, XCircle, FileArchive, Github, Loader2 } from 'lucide-react'
+import { Upload, CheckCircle, XCircle, FileArchive, Github, Loader2, Wand2 } from 'lucide-react'
 import { API_BASE_URL } from '@/lib/api'
 
 export function UploadPage() {
   const navigate = useNavigate()
-  const { uploadSkill, fetchSkills } = useSkillsStore()
+  const { uploadSkill, fetchSkills, generateSkill } = useSkillsStore()
   const [file, setFile] = useState<File | null>(null)
   const [status, setStatus] = useState<'idle' | 'uploading' | 'success' | 'error'>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -19,6 +19,48 @@ export function UploadPage() {
   // GitHub import state
   const [githubUrl, setGithubUrl] = useState('https://github.com/anthropics/skills/tree/main/skills')
   const [importResult, setImportResult] = useState<{ imported: string[], errors: any[] } | null>(null)
+
+  // Generate from URL state
+  const [genSourceUrl, setGenSourceUrl] = useState('')
+  const [genSkillName, setGenSkillName] = useState('')
+  const [genDescription, setGenDescription] = useState('')
+  const [genStatus, setGenStatus] = useState<'idle' | 'generating' | 'success' | 'error'>('idle')
+  const [genError, setGenError] = useState<string | null>(null)
+
+  // Auto-detect source type from URL
+  const genSourceType = (() => {
+    const url = genSourceUrl.toLowerCase()
+    if (url.includes('github.com')) return 'github' as const
+    if (url.endsWith('.pdf')) return 'pdf' as const
+    return 'docs' as const
+  })()
+
+  const genSourceLabel = genSourceType === 'github' ? 'GitHub Repo' : genSourceType === 'pdf' ? 'PDF Document' : 'Docs Website'
+
+  // Auto-suggest skill name from URL
+  const handleGenSourceUrlChange = (url: string) => {
+    setGenSourceUrl(url)
+    // Only auto-fill if user hasn't manually typed a name
+    if (!genSkillName || genSkillName === prevAutoName.current) {
+      let suggested = ''
+      if (url.includes('github.com')) {
+        // Extract "owner/repo" -> "repo" as kebab-case
+        const match = url.match(/github\.com\/[^/]+\/([^/]+)/)
+        if (match) suggested = match[1].toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+      } else {
+        // Use hostname as fallback
+        try {
+          const hostname = new URL(url).hostname.replace('www.', '').split('.')[0]
+          if (hostname) suggested = hostname.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+        } catch { /* ignore invalid URLs */ }
+      }
+      if (suggested) {
+        setGenSkillName(suggested)
+        prevAutoName.current = suggested
+      }
+    }
+  }
+  const prevAutoName = useRef('')
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -68,6 +110,19 @@ export function UploadPage() {
     }
   }
 
+  const handleGenerate = async () => {
+    setGenStatus('generating')
+    setGenError(null)
+    try {
+      await generateSkill(genSourceUrl, genSourceType, genSkillName, genDescription)
+      setGenStatus('success')
+      setTimeout(() => navigate('/skills'), 1500)
+    } catch (e) {
+      setGenStatus('error')
+      setGenError(e instanceof Error ? e.message : 'Generation failed')
+    }
+  }
+
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Add Skills</h1>
@@ -76,6 +131,7 @@ export function UploadPage() {
         <TabsList>
           <TabsTrigger value="github"><Github className="mr-2 h-4 w-4" />Import from GitHub</TabsTrigger>
           <TabsTrigger value="upload"><Upload className="mr-2 h-4 w-4" />Upload ZIP</TabsTrigger>
+          <TabsTrigger value="generate"><Wand2 className="mr-2 h-4 w-4" />Generate from URL</TabsTrigger>
         </TabsList>
 
         <TabsContent value="github">
@@ -182,6 +238,77 @@ export function UploadPage() {
               <div className="flex gap-2">
                 <Button onClick={handleUpload} disabled={!file || status === 'uploading'}>
                   {status === 'uploading' ? 'Uploading...' : 'Upload Skill'}
+                </Button>
+                <Button variant="outline" onClick={() => navigate('/skills')}>Cancel</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="generate">
+          <Card>
+            <CardHeader>
+              <CardTitle>Generate from URL</CardTitle>
+              <CardDescription>Auto-generate a skill from a documentation site, GitHub repo, or PDF</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Source URL</label>
+                <Input
+                  placeholder="https://github.com/owner/repo, https://docs.example.com, or https://example.com/file.pdf"
+                  value={genSourceUrl}
+                  onChange={e => handleGenSourceUrlChange(e.target.value)}
+                />
+                {genSourceUrl && (
+                  <p className="text-xs text-muted-foreground">
+                    Detected: <span className="font-medium text-foreground">{genSourceLabel}</span>
+                    {genSourceType === 'github' && ' — will clone and analyze repository'}
+                    {genSourceType === 'pdf' && ' — will download and extract PDF content'}
+                    {genSourceType === 'docs' && ' — will scrape documentation pages'}
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Skill Name</label>
+                <Input
+                  placeholder="my-skill-name (kebab-case)"
+                  value={genSkillName}
+                  onChange={e => { setGenSkillName(e.target.value); prevAutoName.current = '' }}
+                />
+                <p className="text-xs text-muted-foreground">Lowercase letters, numbers, and hyphens only</p>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Description (optional)</label>
+                <Input
+                  placeholder="A short description of what this skill does"
+                  value={genDescription}
+                  onChange={e => setGenDescription(e.target.value)}
+                />
+              </div>
+
+              {genStatus === 'success' && (
+                <div className="flex items-center gap-2 text-green-600">
+                  <CheckCircle className="h-5 w-5" /> Skill generated successfully!
+                </div>
+              )}
+              {genStatus === 'error' && (
+                <div className="flex items-center gap-2 text-destructive">
+                  <XCircle className="h-5 w-5" /> {genError}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <Button
+                  onClick={handleGenerate}
+                  disabled={genStatus === 'generating' || !genSourceUrl || !genSkillName}
+                >
+                  {genStatus === 'generating' ? (
+                    <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Generating...</>
+                  ) : (
+                    <><Wand2 className="mr-2 h-4 w-4" />Generate</>
+                  )}
                 </Button>
                 <Button variant="outline" onClick={() => navigate('/skills')}>Cancel</Button>
               </div>

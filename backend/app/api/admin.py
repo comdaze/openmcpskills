@@ -180,12 +180,21 @@ async def delete_skill(
     skill_id: str,
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
 ) -> dict[str, str]:
-    """Unload a skill."""
+    """Unload a skill and remove its files from disk."""
+    import shutil
+
     success = await skill_loader.unload_skill(skill_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Skill not found: {skill_id}")
 
-    return {"message": f"Skill {skill_id} unloaded"}
+    # Also remove from disk so the file watcher doesn't reload it
+    settings = get_settings()
+    skill_path = settings.skills_path / skill_id
+    if skill_path.exists():
+        shutil.rmtree(skill_path)
+        logger.info("Removed skill directory: %s", skill_path)
+
+    return {"message": f"Skill {skill_id} deleted"}
 
 
 @router.post("/skills/reload-all")
@@ -526,6 +535,133 @@ async def import_from_github(
                 errors.append({"skill": skill_name, "error": str(e)[:100]})
 
     return {"imported": imported, "count": len(imported), "errors": errors}
+
+
+# ---- Skill Generation (skill-seekers) ----
+
+class GenerateSkillRequest(BaseModel):
+    """Request to generate a skill from an external source."""
+
+    source_url: str
+    source_type: str = "docs"  # "docs" | "github" | "pdf"
+    skill_name: str
+    description: str = ""
+
+
+@router.post("/skills/generate", response_model=SkillResponse)
+async def generate_skill(
+    req: GenerateSkillRequest,
+    skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+) -> SkillResponse:
+    """Generate a skill from a documentation site, GitHub repo, or PDF.
+
+    Requires the optional ``skill-seekers`` package to be installed.
+    """
+    import re
+    import shutil
+
+    from app.services import seekers_bridge
+
+    # 1. Check skill-seekers availability
+    if not seekers_bridge.check_available():
+        raise HTTPException(
+            status_code=501,
+            detail="skill-seekers is not installed. Install with: pip install 'open-mcp-skills[seekers]'",
+        )
+
+    # 2. Validate skill name (kebab-case)
+    if not re.match(r"^[a-z0-9]+(?:-[a-z0-9]+)*$", req.skill_name):
+        raise HTTPException(
+            status_code=400,
+            detail="skill_name must be kebab-case (lowercase letters, numbers, hyphens)",
+        )
+
+    if req.source_type not in ("docs", "github", "pdf"):
+        raise HTTPException(status_code=400, detail="source_type must be 'docs', 'github', or 'pdf'")
+
+    # Auto-detect: GitHub URL overrides source_type to "github"
+    source_type = req.source_type
+    if "github.com" in req.source_url and source_type != "github":
+        logger.info("Auto-detected GitHub URL, switching source_type to 'github'")
+        source_type = "github"
+
+    # Similarly, .pdf URL overrides to "pdf"
+    if req.source_url.lower().endswith(".pdf") and source_type != "pdf":
+        logger.info("Auto-detected PDF URL, switching source_type to 'pdf'")
+        source_type = "pdf"
+
+    # 3. Generate via seekers_bridge
+    try:
+        if source_type == "github":
+            skill_path = await seekers_bridge.generate_skill_from_github(
+                req.source_url, req.skill_name, req.description
+            )
+        elif source_type == "pdf":
+            skill_path = await seekers_bridge.generate_skill_from_pdf(
+                req.source_url, req.skill_name, req.description
+            )
+        else:
+            skill_path = await seekers_bridge.generate_skill_from_docs(
+                req.source_url, req.skill_name, req.description
+            )
+    except Exception as e:
+        logger.error("Skill generation failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
+
+    # 4. Install into skills directory (reuse upload flow)
+    settings = get_settings()
+
+    dest_path = settings.skills_path / req.skill_name
+    if dest_path.exists():
+        shutil.rmtree(dest_path)
+
+    shutil.copytree(skill_path, dest_path)
+
+    # Remove backup files left by enhancement step
+    for bak in dest_path.glob("*.original"):
+        bak.unlink(missing_ok=True)
+
+    # Clean up temp directory
+    try:
+        shutil.rmtree(skill_path.parent)
+    except OSError:
+        pass
+
+    # Validate
+    valid, message = await skill_loader.validate_skill_package(dest_path)
+    if not valid:
+        shutil.rmtree(dest_path, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"Generated skill invalid: {message}")
+
+    # Load
+    skill = await skill_loader.load_skill(dest_path)
+    if not skill:
+        raise HTTPException(status_code=500, detail="Failed to load generated skill")
+
+    # 5. S3 persist (same pattern as upload)
+    if settings.storage_backend == "s3":
+        import json as _json
+
+        from app.api.deps import get_s3_store, get_metadata_store
+
+        s3_store = get_s3_store()
+        metadata_store = get_metadata_store()
+        versions = await s3_store.list_versions(req.skill_name)
+        next_v = f"v{len(versions) + 1}"
+        s3_key = await s3_store.upload_skill(req.skill_name, next_v, dest_path)
+        await metadata_store.put_skill(
+            req.skill_name,
+            name=skill.manifest.name,
+            description=skill.manifest.description,
+            version=next_v,
+            status="active",
+            s3_key=s3_key,
+            manifest_json=_json.dumps(skill.manifest.model_dump(exclude={"instructions"})),
+            author=skill.manifest.metadata.author,
+            tags=skill.manifest.metadata.tags,
+        )
+
+    return skill_to_response(skill)
 
 
 @router.get("/files/download")

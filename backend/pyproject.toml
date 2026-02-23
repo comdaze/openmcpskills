@@ -41,6 +41,9 @@ dev = [
     "mypy>=1.8.0",
     "httpx>=0.26.0",
 ]
+seekers = [
+    "skill-seekers[mcp]>=3.0.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
