@@ -111,12 +111,24 @@ def _read_references(skill_dir: Path, max_total: int = 100_000) -> dict[str, str
 
 def _build_enhancement_prompt(name: str, description: str,
                               current_skill_md: str,
-                              references: dict[str, str]) -> str:
+                              references: dict[str, str],
+                              custom_prompt: str = "") -> str:
     """Build a prompt that asks Claude to produce a high-quality SKILL.md."""
 
     ref_section = ""
     for filename, content in references.items():
         ref_section += f"\n#### {filename}\n```markdown\n{content}\n```\n"
+
+    custom_section = ""
+    if custom_prompt.strip():
+        custom_section = f"""
+USER CUSTOM INSTRUCTIONS:
+The user has provided the following specific requirements for this skill. \
+These instructions take priority over defaults:
+
+{custom_prompt.strip()}
+
+"""
 
     return f"""You are enhancing a Claude skill's SKILL.md file.
 
@@ -124,7 +136,7 @@ SKILL OVERVIEW:
 - Name: {name}
 - Description: {description}
 - Reference files: {len(references)}
-
+{custom_section}
 CURRENT SKILL.MD:
 ```markdown
 {current_skill_md}
@@ -155,13 +167,15 @@ IMPORTANT:
 - Be concise but useful — not overly verbose.
 - Use proper markdown formatting with language-tagged code blocks.
 - Prioritise actionable, practical content.
+- If the user provided custom instructions above, follow them carefully.
 
 OUTPUT:
 Return ONLY the complete SKILL.md content, starting with the --- frontmatter.
 """
 
 
-async def _enhance_skill_md(skill_dir: Path, name: str, description: str) -> None:
+async def _enhance_skill_md(skill_dir: Path, name: str, description: str,
+                            custom_prompt: str = "") -> None:
     """Enhance the SKILL.md in *skill_dir* using the platform's Bedrock LLM.
 
     Reads the current SKILL.md and all reference files, sends them to Claude
@@ -181,7 +195,7 @@ async def _enhance_skill_md(skill_dir: Path, name: str, description: str) -> Non
         logger.info("No reference files found — skipping enhancement")
         return
 
-    prompt = _build_enhancement_prompt(name, description, current_skill_md, references)
+    prompt = _build_enhancement_prompt(name, description, current_skill_md, references, custom_prompt)
 
     # Call Bedrock (same pattern as playground.py)
     client_kwargs: dict = {"region_name": settings.aws_region}
@@ -489,7 +503,8 @@ def _build_github_references(skill_dir: Path, result, code_analysis: dict) -> No
 # ---------------------------------------------------------------------------
 
 
-async def generate_skill_from_docs(url: str, name: str, description: str) -> Path:
+async def generate_skill_from_docs(url: str, name: str, description: str,
+                                   custom_prompt: str = "") -> Path:
     """Generate a skill package by scraping a documentation website.
 
     Uses ``DocToSkillConverter`` from skill-seekers which writes the
@@ -545,13 +560,14 @@ async def generate_skill_from_docs(url: str, name: str, description: str) -> Pat
             )
 
         _ensure_frontmatter(skill_dir, name, description or f"Skill generated from {url}")
-        await _enhance_skill_md(skill_dir, name, description or f"Skill generated from {url}")
+        await _enhance_skill_md(skill_dir, name, description or f"Skill generated from {url}", custom_prompt)
         return skill_dir
     finally:
         os.chdir(prev_cwd)
 
 
-async def generate_skill_from_github(repo_url: str, name: str, description: str) -> Path:
+async def generate_skill_from_github(repo_url: str, name: str, description: str,
+                                     custom_prompt: str = "") -> Path:
     """Generate a skill package by analysing a GitHub repository.
 
     Uses ``UnifiedCodebaseAnalyzer`` which returns an ``AnalysisResult``
@@ -612,13 +628,14 @@ async def generate_skill_from_github(repo_url: str, name: str, description: str)
         )
         (skill_dir / "SKILL.md").write_text(skill_md_content, encoding="utf-8")
 
-        await _enhance_skill_md(skill_dir, name, description or f"Skill generated from {repo_url}")
+        await _enhance_skill_md(skill_dir, name, description or f"Skill generated from {repo_url}", custom_prompt)
         return skill_dir
     finally:
         os.chdir(prev_cwd)
 
 
-async def generate_skill_from_pdf(pdf_url: str, name: str, description: str) -> Path:
+async def generate_skill_from_pdf(pdf_url: str, name: str, description: str,
+                                  custom_prompt: str = "") -> Path:
     """Generate a skill package from a PDF document.
 
     Downloads the PDF from *pdf_url*, then uses ``PDFToSkillConverter``.
@@ -656,7 +673,7 @@ async def generate_skill_from_pdf(pdf_url: str, name: str, description: str) -> 
             raise RuntimeError(f"skill-seekers did not produce output at {skill_dir}")
 
         _ensure_frontmatter(skill_dir, name, description or "Skill generated from PDF")
-        await _enhance_skill_md(skill_dir, name, description or "Skill generated from PDF")
+        await _enhance_skill_md(skill_dir, name, description or "Skill generated from PDF", custom_prompt)
         return skill_dir
     finally:
         os.chdir(prev_cwd)

@@ -54,7 +54,7 @@ interface SkillsState {
   getSkillLogs: (id: string) => Promise<InvocationLog[]>
   getSkillVersions: (id: string) => Promise<SkillVersion[]>
   rollbackSkill: (id: string, version: string) => Promise<void>
-  generateSkill: (sourceUrl: string, sourceType: string, skillName: string, description: string) => Promise<void>
+  generateSkill: (sourceUrl: string, sourceType: string, skillName: string, description: string, customPrompt?: string) => Promise<void>
 }
 
 // Mock data for development
@@ -127,7 +127,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     await get().fetchSkills()
   },
 
-  generateSkill: async (sourceUrl, sourceType, skillName, description) => {
+  generateSkill: async (sourceUrl, sourceType, skillName, description, customPrompt) => {
     const res = await fetch(`${API_BASE_URL}/admin/skills/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -136,6 +136,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         source_type: sourceType,
         skill_name: skillName,
         description,
+        custom_prompt: customPrompt || '',
       }),
     })
     if (!res.ok) {

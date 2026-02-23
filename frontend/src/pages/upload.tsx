@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useSkillsStore } from '@/store/skills-store'
 import { Upload, CheckCircle, XCircle, FileArchive, Github, Loader2, Wand2 } from 'lucide-react'
@@ -23,7 +24,7 @@ export function UploadPage() {
   // Generate from URL state
   const [genSourceUrl, setGenSourceUrl] = useState('')
   const [genSkillName, setGenSkillName] = useState('')
-  const [genDescription, setGenDescription] = useState('')
+  const [genCustomPrompt, setGenCustomPrompt] = useState('')
   const [genStatus, setGenStatus] = useState<'idle' | 'generating' | 'success' | 'error'>('idle')
   const [genError, setGenError] = useState<string | null>(null)
 
@@ -114,7 +115,7 @@ export function UploadPage() {
     setGenStatus('generating')
     setGenError(null)
     try {
-      await generateSkill(genSourceUrl, genSourceType, genSkillName, genDescription)
+      await generateSkill(genSourceUrl, genSourceType, genSkillName, '', genCustomPrompt)
       setGenStatus('success')
       setTimeout(() => navigate('/skills'), 1500)
     } catch (e) {
@@ -280,12 +281,17 @@ export function UploadPage() {
               </div>
 
               <div className="space-y-2">
-                <label className="text-sm font-medium">Description (optional)</label>
-                <Input
-                  placeholder="A short description of what this skill does"
-                  value={genDescription}
-                  onChange={e => setGenDescription(e.target.value)}
+                <label className="text-sm font-medium">Custom Instructions (optional)</label>
+                <Textarea
+                  placeholder={"Provide special requirements for the AI enhancement, e.g.:\n• Focus on Python SDK usage examples\n• Include error handling patterns\n• Write sections in Chinese\n• Emphasize security best practices"}
+                  value={genCustomPrompt}
+                  onChange={e => setGenCustomPrompt(e.target.value)}
+                  rows={4}
+                  className="resize-y"
                 />
+                <p className="text-xs text-muted-foreground">
+                  These instructions will guide the AI when enhancing the generated skill content
+                </p>
               </div>
 
               {genStatus === 'success' && (

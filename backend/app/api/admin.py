@@ -546,6 +546,7 @@ class GenerateSkillRequest(BaseModel):
     source_type: str = "docs"  # "docs" | "github" | "pdf"
     skill_name: str
     description: str = ""
+    custom_prompt: str = ""  # Optional user instructions for LLM enhancement
 
 
 @router.post("/skills/generate", response_model=SkillResponse)
@@ -594,15 +595,15 @@ async def generate_skill(
     try:
         if source_type == "github":
             skill_path = await seekers_bridge.generate_skill_from_github(
-                req.source_url, req.skill_name, req.description
+                req.source_url, req.skill_name, req.description, req.custom_prompt
             )
         elif source_type == "pdf":
             skill_path = await seekers_bridge.generate_skill_from_pdf(
-                req.source_url, req.skill_name, req.description
+                req.source_url, req.skill_name, req.description, req.custom_prompt
             )
         else:
             skill_path = await seekers_bridge.generate_skill_from_docs(
-                req.source_url, req.skill_name, req.description
+                req.source_url, req.skill_name, req.description, req.custom_prompt
             )
     except Exception as e:
         logger.error("Skill generation failed: %s", e)
