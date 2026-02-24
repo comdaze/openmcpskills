@@ -16,6 +16,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import boto3
 import httpx
@@ -499,6 +500,42 @@ def _build_github_references(skill_dir: Path, result, code_analysis: dict) -> No
 
 
 # ---------------------------------------------------------------------------
+# Domain-aware CSS selectors for content extraction
+# ---------------------------------------------------------------------------
+
+# Known domains whose HTML structure doesn't match the default
+# ``div[role="main"]`` selector used by skill-seekers.
+_DOMAIN_SELECTORS: dict[str, dict[str, str]] = {
+    "mp.weixin.qq.com": {
+        "main_content": "#js_content, .rich_media_content, .rich_media_area_primary_inner",
+    },
+}
+
+# Broad fallback chain used for unknown domains.  The original default
+# (``div[role="main"]``) is listed first so existing behaviour is preserved;
+# additional common containers are appended as fallbacks.
+_FALLBACK_MAIN_CONTENT = (
+    'div[role="main"], main, article, '
+    ".content, #content, .post-content, .entry-content, "
+    ".article-content, .rich_media_content"
+)
+
+
+def _selectors_for_url(url: str) -> dict[str, str]:
+    """Return CSS selector config for the given URL.
+
+    Known domains get tailored selectors; everything else gets a broad
+    fallback chain so that content is found even when the default
+    ``div[role="main"]`` doesn't match.
+    """
+    domain = urlparse(url).netloc.lower()
+    for known, sels in _DOMAIN_SELECTORS.items():
+        if domain == known or domain.endswith("." + known):
+            return sels
+    return {"main_content": _FALLBACK_MAIN_CONTENT}
+
+
+# ---------------------------------------------------------------------------
 # Generation entry points
 # ---------------------------------------------------------------------------
 
@@ -529,6 +566,7 @@ async def generate_skill_from_docs(url: str, name: str, description: str,
             "max_pages": 50,
             "async_mode": True,
             "workers": 4,
+            "selectors": _selectors_for_url(url),
         }
 
         converter = DocToSkillConverter(config)
