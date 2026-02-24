@@ -3,7 +3,9 @@
 Provides endpoints for the admin dashboard to manage Claude Skills.
 """
 
+import io
 import logging
+import zipfile
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -11,7 +13,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.api.deps import get_skill_loader, get_s3_store
+from app.api.deps import get_skill_loader, get_s3_store, get_s3_store_optional
 from app.core.config import get_settings
 from app.models.skill import Skill, SkillManifest, SkillMetadata, SkillStatus
 from app.services.skill_loader import SkillLoader
@@ -155,6 +157,52 @@ async def get_skill_instructions(
         name=skill.manifest.name,
         description=skill.manifest.description,
         instructions=skill.manifest.instructions,
+    )
+
+
+DOWNLOAD_EXCLUDE = {".current_version", "__pycache__", ".pyc", ".DS_Store"}
+
+
+@router.get("/skills/{skill_id}/download")
+async def download_skill(
+    skill_id: str,
+    skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    s3_store: Annotated[S3SkillStore | None, Depends(get_s3_store_optional)],
+):
+    """Download a skill as a zip file."""
+    skill = await skill_loader.get_skill(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"Skill not found: {skill_id}")
+
+    skill_dir = Path(skill.source_path) if skill.source_path else None
+
+    # If S3 mode and local directory doesn't exist, download from S3
+    if (skill_dir is None or not skill_dir.exists()) and s3_store is not None:
+        skill_dir = await s3_store.download_skill(skill_id)
+
+    if skill_dir is None or not skill_dir.exists():
+        raise HTTPException(status_code=404, detail="Skill files not found on disk")
+
+    # Build zip in memory
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file_path in sorted(skill_dir.rglob("*")):
+            if not file_path.is_file():
+                continue
+            # Skip excluded files/directories
+            parts = file_path.relative_to(skill_dir).parts
+            if any(part in DOWNLOAD_EXCLUDE or part.endswith(".pyc") for part in parts):
+                continue
+            arcname = str(Path(skill_id) / file_path.relative_to(skill_dir))
+            zf.write(file_path, arcname)
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{skill_id}.zip"',
+        },
     )
 
 

@@ -6,15 +6,17 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { useSkillsStore, Skill } from '@/store/skills-store'
-import { RefreshCw, MoreHorizontal, Upload, Search, Trash2, Eye } from 'lucide-react'
+import { RefreshCw, MoreHorizontal, Upload, Search, Trash2, Eye, Download } from 'lucide-react'
 
 export function SkillsPage() {
   const navigate = useNavigate()
-  const { skills, fetchSkills, reloadSkill, reloadAll, unloadSkill, loading } = useSkillsStore()
+  const { skills, fetchSkills, reloadSkill, reloadAll, unloadSkill, downloadSkill, loading } = useSkillsStore()
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
+  const [unloadTarget, setUnloadTarget] = useState<Skill | null>(null)
 
   useEffect(() => { fetchSkills() }, [fetchSkills])
 
@@ -97,7 +99,10 @@ export function SkillsPage() {
                         <DropdownMenuItem onClick={() => reloadSkill(skill.id)}>
                           <RefreshCw className="mr-2 h-4 w-4" /> Reload
                         </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => unloadSkill(skill.id)} className="text-destructive">
+                        <DropdownMenuItem onClick={() => downloadSkill(skill.id)}>
+                          <Download className="mr-2 h-4 w-4" /> Download
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setUnloadTarget(skill)} className="text-destructive">
                           <Trash2 className="mr-2 h-4 w-4" /> Unload
                         </DropdownMenuItem>
                       </DropdownMenuContent>
@@ -109,6 +114,21 @@ export function SkillsPage() {
           </Table>
         </CardContent>
       </Card>
+
+      <Dialog open={!!unloadTarget} onOpenChange={(open) => { if (!open) setUnloadTarget(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Unload Skill</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to unload <span className="font-medium text-foreground">{unloadTarget?.name || unloadTarget?.manifest?.name || unloadTarget?.id}</span>? This will remove the skill and its files from disk.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setUnloadTarget(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={() => { if (unloadTarget) { unloadSkill(unloadTarget.id); setUnloadTarget(null) } }}>Unload</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

@@ -54,6 +54,7 @@ interface SkillsState {
   getSkillLogs: (id: string) => Promise<InvocationLog[]>
   getSkillVersions: (id: string) => Promise<SkillVersion[]>
   rollbackSkill: (id: string, version: string) => Promise<void>
+  downloadSkill: (id: string) => void
   generateSkill: (sourceUrl: string, sourceType: string, skillName: string, description: string, customPrompt?: string) => Promise<void>
 }
 
@@ -125,6 +126,10 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   rollbackSkill: async (id, version) => {
     await apiFetch(`/admin/skills/${id}/rollback`, { method: 'POST', body: JSON.stringify({ version }) })
     await get().fetchSkills()
+  },
+
+  downloadSkill: (id) => {
+    window.open(`${API_BASE_URL}/admin/skills/${id}/download`)
   },
 
   generateSkill: async (sourceUrl, sourceType, skillName, description, customPrompt) => {

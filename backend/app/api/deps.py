@@ -92,6 +92,10 @@ def get_s3_store() -> S3SkillStore:
     return _s3_store
 
 
+def get_s3_store_optional() -> S3SkillStore | None:
+    return _s3_store
+
+
 # Type aliases for FastAPI dependency injection
 SkillLoaderDep = Annotated[SkillLoader, Depends(get_skill_loader)]
 SessionManagerDep = Annotated[SessionManager, Depends(get_session_manager)]
