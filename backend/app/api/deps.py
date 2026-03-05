@@ -2,8 +2,10 @@
 
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, HTTPException, Security, status
+from fastapi.security import APIKeyHeader
 
+from app.core.config import get_settings
 from app.services.mcp_engine import MCPEngine
 from app.services.session_manager import SessionManager
 from app.services.skill_loader import SkillLoader
@@ -18,6 +20,9 @@ _mcp_engine: MCPEngine | None = None
 _metadata_store: MetadataStore | None = None
 _invocation_logger: InvocationLogger | None = None
 _s3_store: S3SkillStore | None = None
+
+# API Key header scheme
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 def set_skill_loader(loader: SkillLoader) -> None:
@@ -96,7 +101,37 @@ def get_s3_store_optional() -> S3SkillStore | None:
     return _s3_store
 
 
+async def verify_mcp_api_key(
+    api_key: str | None = Security(api_key_header),
+) -> str | None:
+    """Verify MCP API Key for authentication.
+
+    Returns the API key if valid, None if auth is disabled.
+    Raises HTTPException 401 if auth is enabled and key is invalid.
+    """
+    settings = get_settings()
+
+    # Auth not enabled - allow all requests
+    if not settings.mcp_auth_enabled:
+        return None
+
+    # No API keys configured - allow all (dev mode warning logged elsewhere)
+    if not settings.mcp_api_keys:
+        return None
+
+    # Validate the provided key
+    if not api_key or api_key not in settings.mcp_api_keys:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
+
+    return api_key
+
+
 # Type aliases for FastAPI dependency injection
 SkillLoaderDep = Annotated[SkillLoader, Depends(get_skill_loader)]
 SessionManagerDep = Annotated[SessionManager, Depends(get_session_manager)]
 MCPEngineDep = Annotated[MCPEngine, Depends(get_mcp_engine)]
+MCPApiKeyDep = Annotated[str | None, Depends(verify_mcp_api_key)]

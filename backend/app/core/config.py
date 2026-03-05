@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -68,6 +68,18 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = True
     rate_limit_requests: int = 100
     rate_limit_window_seconds: int = 60
+
+    # MCP API Key Authentication
+    mcp_auth_enabled: bool = False  # Enable in production
+    mcp_api_keys: list[str] = []  # Comma-separated in env: "key1,key2,key3"
+
+    @field_validator("mcp_api_keys", mode="before")
+    @classmethod
+    def parse_api_keys(cls, v):
+        """Parse comma-separated API keys from environment variable."""
+        if isinstance(v, str):
+            return [k.strip() for k in v.split(",") if k.strip()]
+        return v or []
 
     # Sandbox Configuration
     sandbox_enabled: bool = True
