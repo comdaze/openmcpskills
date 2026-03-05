@@ -2,8 +2,8 @@
 
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Security, status
-from fastapi.security import APIKeyHeader
+from fastapi import Depends, HTTPException, Request, Security, status
+from fastapi.security import APIKeyHeader, APIKeyQuery
 
 from app.core.config import get_settings
 from app.services.mcp_engine import MCPEngine
@@ -21,8 +21,9 @@ _metadata_store: MetadataStore | None = None
 _invocation_logger: InvocationLogger | None = None
 _s3_store: S3SkillStore | None = None
 
-# API Key header scheme
+# API Key schemes (header and query string)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+api_key_query = APIKeyQuery(name="api_key", auto_error=False)
 
 
 def set_skill_loader(loader: SkillLoader) -> None:
@@ -102,9 +103,16 @@ def get_s3_store_optional() -> S3SkillStore | None:
 
 
 async def verify_mcp_api_key(
-    api_key: str | None = Security(api_key_header),
+    api_key_from_header: str | None = Security(api_key_header),
+    api_key_from_query: str | None = Security(api_key_query),
 ) -> str | None:
     """Verify MCP API Key for authentication.
+
+    Supports two methods:
+    1. X-API-Key header: -H "X-API-Key: sk-xxx"
+    2. Query string: ?api_key=sk-xxx
+
+    Header takes precedence if both are provided.
 
     Returns the API key if valid, None if auth is disabled.
     Raises HTTPException 401 if auth is enabled and key is invalid.
@@ -118,6 +126,9 @@ async def verify_mcp_api_key(
     # No API keys configured - allow all (dev mode warning logged elsewhere)
     if not settings.mcp_api_keys:
         return None
+
+    # Try header first, then query string
+    api_key = api_key_from_header or api_key_from_query
 
     # Validate the provided key
     if not api_key or api_key not in settings.mcp_api_keys:
