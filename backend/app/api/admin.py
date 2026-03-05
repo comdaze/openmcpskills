@@ -5,6 +5,7 @@ Provides endpoints for the admin dashboard to manage Claude Skills.
 
 import io
 import logging
+import secrets
 import zipfile
 from pathlib import Path
 from typing import Annotated, Any
@@ -834,3 +835,92 @@ async def stream_file(s3_key: str):
         media_type=content_type,
         headers=headers,
     )
+
+
+# ---- API Key Management ----
+
+class GenerateApiKeyResponse(BaseModel):
+    """Response from API key generation."""
+    api_key: str
+    message: str
+
+
+class ApiKeyStatusResponse(BaseModel):
+    """Response with API key authentication status."""
+    auth_enabled: bool
+    keys_configured: int
+    message: str
+
+
+@router.post("/api-keys/generate", response_model=GenerateApiKeyResponse)
+async def generate_api_key() -> GenerateApiKeyResponse:
+    """Generate a new MCP API key.
+    
+    The key is automatically added to the server configuration.
+    Note: In production, keys should be stored securely (e.g., AWS Secrets Manager).
+    """
+    settings = get_settings()
+    
+    # Generate a secure random key
+    new_key = f"sk-mcp-{secrets.token_hex(16)}"
+    
+    # Add to existing keys
+    current_keys = list(settings.mcp_api_keys) if settings.mcp_api_keys else []
+    current_keys.append(new_key)
+    
+    # Update settings (in-memory only - for persistent storage, use env vars or secrets manager)
+    settings.mcp_api_keys = current_keys
+    
+    # Also enable auth if not already enabled
+    if not settings.mcp_auth_enabled:
+        settings.mcp_auth_enabled = True
+        logger.info("MCP API key authentication has been enabled")
+    
+    logger.info("Generated new API key (total keys: %d)", len(current_keys))
+    
+    return GenerateApiKeyResponse(
+        api_key=new_key,
+        message=f"API key generated successfully. Total keys: {len(current_keys)}. "
+                "Note: This key is stored in memory only. For persistence, add it to MCP_API_KEYS environment variable."
+    )
+
+
+@router.get("/api-keys/status", response_model=ApiKeyStatusResponse)
+async def get_api_key_status() -> ApiKeyStatusResponse:
+    """Get the current API key authentication status."""
+    settings = get_settings()
+    
+    return ApiKeyStatusResponse(
+        auth_enabled=settings.mcp_auth_enabled,
+        keys_configured=len(settings.mcp_api_keys) if settings.mcp_api_keys else 0,
+        message="API key authentication is " + ("enabled" if settings.mcp_auth_enabled else "disabled")
+    )
+
+
+class RevokeApiKeyRequest(BaseModel):
+    """Request to revoke an API key."""
+    api_key: str
+
+
+@router.post("/api-keys/revoke")
+async def revoke_api_key(req: RevokeApiKeyRequest) -> dict[str, str]:
+    """Revoke an existing API key.
+    
+    Note: This only removes the key from memory. Update MCP_API_KEYS env var to persist the change.
+    """
+    settings = get_settings()
+    
+    current_keys = list(settings.mcp_api_keys) if settings.mcp_api_keys else []
+    
+    if req.api_key not in current_keys:
+        raise HTTPException(status_code=404, detail="API key not found")
+    
+    current_keys.remove(req.api_key)
+    settings.mcp_api_keys = current_keys
+    
+    logger.info("Revoked API key (remaining keys: %d)", len(current_keys))
+    
+    return {
+        "message": f"API key revoked successfully. Remaining keys: {len(current_keys)}",
+        "remaining_keys": str(len(current_keys))
+    }
