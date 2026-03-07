@@ -3,21 +3,20 @@
  * Connects to backend Bedrock API for Claude inference with MCP tool support
  */
 
-import type { ChatModelAdapter, ChatModelRunOptions } from "@assistant-ui/react";
+import type { ChatModelAdapter, ChatModelRunOptions, ChatModelRunResult } from "@assistant-ui/react";
 import type { MutableRefObject } from "react";
+import { API_BASE_URL } from "./api";
 
 export interface PlaygroundConfig {
   model: string;
   useMcpServer: boolean;
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
-
 export function createPlaygroundAdapter(
   configRef: MutableRefObject<PlaygroundConfig>
 ): ChatModelAdapter {
   return {
-    async *run({ messages, abortSignal }: ChatModelRunOptions) {
+    async *run({ messages, abortSignal }: ChatModelRunOptions): AsyncGenerator<ChatModelRunResult> {
       const config = configRef.current;
       
       // Get settings from localStorage
@@ -62,30 +61,30 @@ export function createPlaygroundAdapter(
       const data = await response.json();
       
       // Convert response to assistant-ui format
-      const content: Array<{ type: string; text?: string; toolCallId?: string; toolName?: string; args?: unknown; result?: unknown }> = [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const content: any[] = [];
       
       for (const block of data.content || []) {
         if (block.type === 'text') {
-          content.push({ type: 'text', text: block.text });
+          content.push({ type: 'text' as const, text: block.text });
         } else if (block.type === 'tool_use') {
           content.push({
-            type: 'tool-call',
+            type: 'tool-call' as const,
             toolCallId: block.id,
             toolName: block.name,
             args: block.input,
+            argsText: JSON.stringify(block.input),
           });
         } else if (block.type === 'tool_result') {
           content.push({
-            type: 'tool-result',
+            type: 'tool-result' as const,
             toolCallId: block.tool_use_id,
             result: block.content,
           });
         }
       }
 
-      yield {
-        content,
-      };
+      yield { content };
     },
   };
 }
