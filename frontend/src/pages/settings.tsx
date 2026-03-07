@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 import { apiFetch } from '@/lib/api'
-import { Server, Database, Cloud, CheckCircle, XCircle, Brain, Save, Check, Key, Copy, Eye, EyeOff, RefreshCw } from 'lucide-react'
+import { Server, Database, Cloud, CheckCircle, XCircle, Brain, Save, Check, Shield, Copy, ExternalLink } from 'lucide-react'
 
 interface ServerInfo {
   name: string
@@ -19,20 +19,21 @@ interface HealthStatus {
   skills_loaded: number
 }
 
-interface ApiKeyStatus {
-  auth_enabled: boolean
-  keys_configured: number
-  message: string
-}
-
-interface GeneratedApiKey {
-  api_key: string
-  message: string
+interface AuthConfig {
+  auth_type: 'cognito' | 'api_key' | 'none'
+  cognito_enabled: boolean
+  cognito_region?: string
+  cognito_user_pool_id?: string
+  token_endpoint?: string
+  client_id?: string
+  scopes?: string
+  mcp_server_url: string
 }
 
 export function SettingsPage() {
   const [info, setInfo] = useState<ServerInfo | null>(null)
   const [health, setHealth] = useState<HealthStatus | null>(null)
+  const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null)
   const [bedrockApiKey, setBedrockApiKey] = useState('')
   const [bedrockEndpoint, setBedrockEndpoint] = useState('')
   const defaultMcpUrl = import.meta.env.VITE_MCP_SERVER_URL || 'https://mcp.openmcpskills.click/mcp'
@@ -40,30 +41,29 @@ export function SettingsPage() {
   const [isSaving, setIsSaving] = useState(false)
   const [showSuccess, setShowSuccess] = useState(false)
   
-  // API Key state
-  const [apiKeyStatus, setApiKeyStatus] = useState<ApiKeyStatus | null>(null)
-  const [generatedKey, setGeneratedKey] = useState<string | null>(null)
-  const [isGeneratingKey, setIsGeneratingKey] = useState(false)
-  const [showKey, setShowKey] = useState(false)
-  const [keyCopied, setKeyCopied] = useState(false)
+  // Copy state for different fields
+  const [copiedField, setCopiedField] = useState<string | null>(null)
 
   useEffect(() => {
     apiFetch<ServerInfo>('/info').then(setInfo).catch(() => setInfo({ name: 'MCP Skills Server', version: 'unknown', storage_backend: 'unknown' }))
     apiFetch<HealthStatus>('/health').then(setHealth).catch(() => setHealth({ status: 'unknown', skills_loaded: 0 }))
-    apiFetch<ApiKeyStatus>('/admin/api-keys/status').then(setApiKeyStatus).catch(() => setApiKeyStatus(null))
+    apiFetch<AuthConfig>('/admin/auth-config').then(setAuthConfig).catch(() => {
+      // Fallback to default config if endpoint not available
+      setAuthConfig({
+        auth_type: 'cognito',
+        cognito_enabled: true,
+        mcp_server_url: defaultMcpUrl,
+      })
+    })
     
     // Load saved settings from localStorage
     const savedApiKey = localStorage.getItem('bedrock_api_key') || ''
     const savedEndpoint = localStorage.getItem('bedrock_endpoint') || ''
     const savedMcpUrl = localStorage.getItem('mcp_server_url') || defaultMcpUrl
-    const savedMcpApiKey = localStorage.getItem('mcp_api_key') || ''
     
     setBedrockApiKey(savedApiKey)
     setBedrockEndpoint(savedEndpoint)
     setMcpServerUrl(savedMcpUrl)
-    if (savedMcpApiKey) {
-      setGeneratedKey(savedMcpApiKey)
-    }
   }, [])
 
   const handleSaveSettings = () => {
@@ -82,44 +82,21 @@ export function SettingsPage() {
     }, 500)
   }
 
-  const handleGenerateApiKey = async () => {
-    setIsGeneratingKey(true)
-    try {
-      const response = await apiFetch<GeneratedApiKey>('/admin/api-keys/generate', {
-        method: 'POST'
-      })
-      setGeneratedKey(response.api_key)
-      setShowKey(true)
-      // Save to localStorage for persistence
-      localStorage.setItem('mcp_api_key', response.api_key)
-      // Refresh status
-      const status = await apiFetch<ApiKeyStatus>('/admin/api-keys/status')
-      setApiKeyStatus(status)
-    } catch (error) {
-      console.error('Failed to generate API key:', error)
-    } finally {
-      setIsGeneratingKey(false)
-    }
-  }
-
-  const handleCopyKey = async () => {
-    if (generatedKey) {
-      await navigator.clipboard.writeText(generatedKey)
-      setKeyCopied(true)
-      setTimeout(() => setKeyCopied(false), 2000)
-    }
-  }
-
-  const handleCopyMcpUrl = async () => {
-    if (generatedKey && mcpServerUrl) {
-      const fullUrl = `${mcpServerUrl}?api_key=${generatedKey}`
-      await navigator.clipboard.writeText(fullUrl)
-      setKeyCopied(true)
-      setTimeout(() => setKeyCopied(false), 2000)
-    }
+  const handleCopy = async (text: string, field: string) => {
+    await navigator.clipboard.writeText(text)
+    setCopiedField(field)
+    setTimeout(() => setCopiedField(null), 2000)
   }
 
   const isHealthy = health?.status === 'healthy'
+
+  // OAuth configuration values (from backend or defaults)
+  const oauthConfig = {
+    tokenEndpoint: authConfig?.token_endpoint || 'https://openmcpskills-1772838404.auth.us-east-1.amazoncognito.com/oauth2/token',
+    clientId: authConfig?.client_id || '(Contact administrator)',
+    scopes: authConfig?.scopes || 'openmcpskills-api/mcp openmcpskills-api/read',
+    mcpServerUrl: mcpServerUrl,
+  }
 
   return (
     <div className="space-y-6">
@@ -192,92 +169,133 @@ export function SettingsPage() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <Key className="h-5 w-5" /> MCP API Key
+            <Shield className="h-5 w-5" /> MCP Authentication
           </CardTitle>
-          <CardDescription>Generate and manage API keys for MCP server authentication</CardDescription>
+          <CardDescription>OAuth 2.0 credentials for MCP server integration (Quick Suite / AgentCore compatible)</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex justify-between items-center">
-            <span className="text-muted-foreground">Authentication Status</span>
-            <Badge variant={apiKeyStatus?.auth_enabled ? 'default' : 'secondary'}>
-              {apiKeyStatus?.auth_enabled ? 'Enabled' : 'Disabled'}
+            <span className="text-muted-foreground">Authentication Type</span>
+            <Badge variant={authConfig?.cognito_enabled ? 'default' : 'secondary'}>
+              {authConfig?.cognito_enabled ? 'OAuth 2.0 (Cognito S2S)' : 'Disabled'}
             </Badge>
           </div>
           <Separator />
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">Keys Configured</span>
-            <span className="font-medium">{apiKeyStatus?.keys_configured ?? 0}</span>
-          </div>
-          <Separator />
           
-          {generatedKey ? (
-            <div className="space-y-3">
-              <Label>Your API Key</Label>
-              <div className="flex gap-2">
-                <Input
-                  type={showKey ? 'text' : 'password'}
-                  value={generatedKey}
-                  readOnly
-                  className="font-mono text-sm"
-                />
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={() => setShowKey(!showKey)}
-                >
-                  {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={handleCopyKey}
-                >
-                  {keyCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                </Button>
-              </div>
+          {authConfig?.cognito_enabled && (
+            <div className="space-y-4">
+              {/* MCP Server URL */}
               <div className="space-y-2">
-                <Label className="text-sm text-muted-foreground">Full MCP URL with API Key</Label>
+                <Label className="text-xs text-muted-foreground">MCP Server URL</Label>
                 <div className="flex gap-2">
                   <Input
-                    type="text"
-                    value={`${mcpServerUrl}?api_key=${showKey ? generatedKey : '***'}`}
+                    value={oauthConfig.mcpServerUrl}
                     readOnly
-                    className="font-mono text-xs"
+                    className="font-mono text-xs bg-muted"
                   />
                   <Button
                     variant="outline"
                     size="icon"
-                    onClick={handleCopyMcpUrl}
-                    title="Copy full URL with API key"
+                    onClick={() => handleCopy(oauthConfig.mcpServerUrl, 'mcpUrl')}
+                    title="Copy MCP Server URL"
                   >
-                    <Copy className="h-4 w-4" />
+                    {copiedField === 'mcpUrl' ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
                   </Button>
                 </div>
               </div>
-              <Button 
-                variant="outline" 
-                onClick={handleGenerateApiKey}
-                disabled={isGeneratingKey}
-                className="w-full"
-              >
-                <RefreshCw className={`h-4 w-4 mr-2 ${isGeneratingKey ? 'animate-spin' : ''}`} />
-                Generate New Key
-              </Button>
+
+              {/* Token Endpoint */}
+              <div className="space-y-2">
+                <Label className="text-xs text-muted-foreground">Token Endpoint</Label>
+                <div className="flex gap-2">
+                  <Input
+                    value={oauthConfig.tokenEndpoint}
+                    readOnly
+                    className="font-mono text-xs bg-muted"
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() => handleCopy(oauthConfig.tokenEndpoint, 'tokenEndpoint')}
+                    title="Copy Token Endpoint"
+                  >
+                    {copiedField === 'tokenEndpoint' ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                  </Button>
+                </div>
+              </div>
+
+              {/* Client ID */}
+              <div className="space-y-2">
+                <Label className="text-xs text-muted-foreground">Client ID</Label>
+                <div className="flex gap-2">
+                  <Input
+                    value={oauthConfig.clientId}
+                    readOnly
+                    className="font-mono text-xs bg-muted"
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() => handleCopy(oauthConfig.clientId, 'clientId')}
+                    title="Copy Client ID"
+                    disabled={oauthConfig.clientId === '(Contact administrator)'}
+                  >
+                    {copiedField === 'clientId' ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                  </Button>
+                </div>
+              </div>
+
+              {/* Scopes */}
+              <div className="space-y-2">
+                <Label className="text-xs text-muted-foreground">Scopes</Label>
+                <div className="flex gap-2">
+                  <Input
+                    value={oauthConfig.scopes}
+                    readOnly
+                    className="font-mono text-xs bg-muted"
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() => handleCopy(oauthConfig.scopes, 'scopes')}
+                    title="Copy Scopes"
+                  >
+                    {copiedField === 'scopes' ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                  </Button>
+                </div>
+              </div>
+
+              <Separator />
+
+              {/* Quick Suite Integration Guide */}
+              <div className="bg-blue-50 dark:bg-blue-950 rounded-lg p-4 space-y-2">
+                <h4 className="font-medium text-sm flex items-center gap-2">
+                  <ExternalLink className="h-4 w-4" />
+                  Quick Suite Integration
+                </h4>
+                <p className="text-xs text-muted-foreground">
+                  In Amazon Quick Suite, add an MCP Integration with these settings:
+                </p>
+                <ul className="text-xs text-muted-foreground list-disc list-inside space-y-1">
+                  <li>Authentication Type: <code className="bg-muted px-1 rounded">OAuth 2.0 / Service Account</code></li>
+                  <li>Grant Type: <code className="bg-muted px-1 rounded">Client Credentials</code></li>
+                  <li>Client Secret: <code className="bg-muted px-1 rounded">(Obtain from administrator)</code></li>
+                </ul>
+              </div>
+
+              <p className="text-xs text-muted-foreground">
+                Use OAuth 2.0 Client Credentials flow to obtain an access token, then include it as 
+                <code className="bg-muted px-1 mx-1 rounded">Authorization: Bearer &lt;token&gt;</code> 
+                header in MCP requests.
+              </p>
             </div>
-          ) : (
-            <Button 
-              onClick={handleGenerateApiKey}
-              disabled={isGeneratingKey}
-              className="w-full"
-            >
-              <Key className="h-4 w-4 mr-2" />
-              {isGeneratingKey ? 'Generating...' : 'Generate API Key'}
-            </Button>
           )}
-          
-          <p className="text-xs text-muted-foreground">
-            Use this key in the <code className="bg-muted px-1 rounded">X-API-Key</code> header or as <code className="bg-muted px-1 rounded">?api_key=</code> query parameter.
-          </p>
+
+          {!authConfig?.cognito_enabled && (
+            <p className="text-sm text-muted-foreground">
+              Authentication is currently disabled. Contact your administrator to enable OAuth 2.0 authentication.
+            </p>
+          )}
         </CardContent>
       </Card>
 

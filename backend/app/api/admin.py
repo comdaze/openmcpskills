@@ -924,3 +924,57 @@ async def revoke_api_key(req: RevokeApiKeyRequest) -> dict[str, str]:
         "message": f"API key revoked successfully. Remaining keys: {len(current_keys)}",
         "remaining_keys": str(len(current_keys))
     }
+
+
+# ---- Authentication Configuration ----
+
+class AuthConfigResponse(BaseModel):
+    """Response with authentication configuration for frontend display."""
+    auth_type: str  # 'cognito', 'api_key', or 'none'
+    cognito_enabled: bool
+    cognito_region: str | None = None
+    cognito_user_pool_id: str | None = None
+    token_endpoint: str | None = None
+    client_id: str | None = None
+    scopes: str | None = None
+    mcp_server_url: str
+
+
+@router.get("/auth-config", response_model=AuthConfigResponse)
+async def get_auth_config() -> AuthConfigResponse:
+    """Get authentication configuration for MCP integration.
+    
+    Returns OAuth 2.0 (Cognito S2S) configuration details that clients
+    need to authenticate with the MCP server.
+    
+    Note: Client Secret is NOT returned for security reasons.
+    Administrators should provide it separately through secure channels.
+    """
+    settings = get_settings()
+    
+    # Determine auth type
+    if settings.cognito_enabled:
+        auth_type = "cognito"
+    elif settings.mcp_auth_enabled:
+        auth_type = "api_key"
+    else:
+        auth_type = "none"
+    
+    # Build token endpoint URL if Cognito is enabled
+    token_endpoint = None
+    if settings.cognito_enabled and settings.cognito_user_pool_id:
+        cognito_region = settings.cognito_region or settings.aws_region
+        # Try to use configured token endpoint, or construct from user pool
+        token_endpoint = settings.cognito_token_endpoint
+        # Note: Domain prefix is not easily derivable, so we rely on configured endpoint
+    
+    return AuthConfigResponse(
+        auth_type=auth_type,
+        cognito_enabled=settings.cognito_enabled,
+        cognito_region=settings.cognito_region or settings.aws_region,
+        cognito_user_pool_id=settings.cognito_user_pool_id if settings.cognito_enabled else None,
+        token_endpoint=token_endpoint,
+        client_id=settings.cognito_client_id if settings.cognito_enabled else None,
+        scopes=" ".join(settings.cognito_scopes_list) if settings.cognito_scopes_list else "openmcpskills-api/mcp openmcpskills-api/read",
+        mcp_server_url=settings.mcp_server_url,
+    )
