@@ -837,6 +837,97 @@ async def stream_file(s3_key: str):
     )
 
 
+@router.get("/f/{short_id}")
+async def short_link_redirect(short_id: str):
+    """Redirect short link to file download.
+
+    Short links are stored in DynamoDB with session_id = 'file:{short_id}'.
+    This avoids URL encoding issues with platforms like Feishu that encode
+    underscores and other characters in URLs.
+
+    Args:
+        short_id: 8-character alphanumeric short link ID
+    """
+    settings = get_settings()
+
+    # Validate short_id format (alphanumeric only)
+    if not short_id.isalnum() or len(short_id) != 8:
+        raise HTTPException(status_code=400, detail="Invalid short link format")
+
+    # Look up in DynamoDB
+    import boto3
+    dynamodb = boto3.resource("dynamodb", region_name=settings.aws_region)
+    table = dynamodb.Table(settings.dynamodb_sessions_table)
+
+    try:
+        response = table.get_item(Key={"session_id": f"file:{short_id}"})
+    except Exception as e:
+        logger.error(f"DynamoDB lookup failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to look up short link")
+
+    item = response.get("Item")
+    if not item:
+        raise HTTPException(status_code=404, detail="Short link not found or expired")
+
+    s3_key = item.get("s3_key")
+    if not s3_key:
+        raise HTTPException(status_code=500, detail="Invalid short link data")
+
+    # Stream file directly (same as /files/stream)
+    bucket = item.get("s3_bucket") or settings.code_interpreter_s3_bucket
+    if not bucket:
+        raise HTTPException(status_code=500, detail="S3 bucket not configured")
+
+    from botocore.config import Config as BotoConfig
+    s3_kwargs: dict = {
+        "region_name": settings.aws_region,
+        "config": BotoConfig(signature_version="s3v4"),
+    }
+    if settings.aws_access_key_id and settings.aws_secret_access_key:
+        s3_kwargs["aws_access_key_id"] = settings.aws_access_key_id
+        s3_kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
+    s3 = boto3.client("s3", **s3_kwargs)
+
+    try:
+        response = s3.get_object(Bucket=bucket, Key=s3_key)
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code in ("NoSuchKey", "404"):
+            raise HTTPException(status_code=404, detail="File not found")
+        logger.error(f"S3 get_object failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve file")
+
+    # Get filename from DynamoDB item or extract from s3_key
+    filename = item.get("filename") or s3_key.rsplit("/", 1)[-1]
+    if "_" in filename and filename.split("_", 1)[0].isdigit():
+        filename = filename.split("_", 1)[1]
+
+    content_type = response.get("ContentType", "application/octet-stream")
+    content_length = response.get("ContentLength")
+
+    from urllib.parse import quote
+    ascii_filename = filename.encode("ascii", "replace").decode("ascii")
+    headers = {
+        "Content-Disposition": (
+            f"attachment; filename=\"{ascii_filename}\"; "
+            f"filename*=UTF-8''{quote(filename)}"
+        ),
+    }
+    if content_length:
+        headers["Content-Length"] = str(content_length)
+
+    def stream_body():
+        body = response["Body"]
+        while chunk := body.read(64 * 1024):
+            yield chunk
+
+    return StreamingResponse(
+        stream_body(),
+        media_type=content_type,
+        headers=headers,
+    )
+
+
 # ---- API Key Management ----
 
 class GenerateApiKeyResponse(BaseModel):
