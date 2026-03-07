@@ -175,8 +175,8 @@ class CodeInterpreterService:
                     "created_at": int(time.time()),
                     "ttl": int(time.time()) + 86400 * 30,  # 30 days expiry
                 })
-                # Use short URL format: /f/{short_id}
-                download_url = f"{base_url}/f/{short_id}"
+                # Use short URL format: /admin/f/{short_id}
+                download_url = f"{base_url}/admin/f/{short_id}"
                 logger.info(f"Created short link: {download_url} -> {s3_key}")
             except Exception as e:
                 # Fall back to long URL if DynamoDB fails
