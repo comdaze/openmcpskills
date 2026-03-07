@@ -89,9 +89,13 @@ keep = ['family','containerDefinitions','taskRoleArn','executionRoleArn','networ
         'requiresCompatibilities','cpu','memory','runtimePlatform']
 out = {k: td[k] for k in keep if k in td}
 
-# Fargate resources: 2 vCPU, 4 GB memory
+# Fargate resources: 2 vCPU, 4 GB memory on ARM64 (Graviton)
 out['cpu'] = '2048'
 out['memory'] = '4096'
+out['runtimePlatform'] = {
+    'cpuArchitecture': 'ARM64',
+    'operatingSystemFamily': 'LINUX'
+}
 
 with open('/tmp/task-def.json', 'w') as f:
     json.dump(out, f)
