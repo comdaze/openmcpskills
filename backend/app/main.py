@@ -79,6 +79,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         logger.info("Code Interpreter service initialized")
 
+    # Initialize Cognito authentication service if enabled
+    if settings.cognito_enabled:
+        from app.services.cognito_auth import CognitoAuthService, set_cognito_service
+        
+        cognito_region = settings.cognito_region or settings.aws_region
+        if not settings.cognito_user_pool_id:
+            logger.error("Cognito enabled but COGNITO_USER_POOL_ID not set")
+        else:
+            cognito_service = CognitoAuthService(
+                region=cognito_region,
+                user_pool_id=settings.cognito_user_pool_id,
+                allowed_client_ids=settings.cognito_allowed_client_ids_list,
+            )
+            set_cognito_service(cognito_service)
+            logger.info(f"Cognito S2S authentication enabled")
+            logger.info(f"  User Pool ID: {settings.cognito_user_pool_id}")
+            logger.info(f"  Region: {cognito_region}")
+            if settings.cognito_allowed_client_ids_list:
+                logger.info(f"  Allowed Client IDs: {settings.cognito_allowed_client_ids_list}")
+            else:
+                logger.info(f"  Allowed Client IDs: (any)")
+    else:
+        logger.info("Cognito authentication: disabled")
+
     mcp_engine = MCPEngine(
         skill_loader,
         session_manager,

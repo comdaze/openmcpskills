@@ -58,11 +58,30 @@ class Settings(BaseSettings):
     dynamodb_invocation_logs_table: str = "mcp-invocation-logs"
     invocation_log_ttl_days: int = 30
 
-    # Authentication (AWS Cognito)
+    # Authentication (AWS Cognito S2S)
     cognito_enabled: bool = False
     cognito_user_pool_id: str | None = None
-    cognito_client_id: str | None = None
+    cognito_client_id: str | None = None  # App client ID for this service (if acting as client)
+    cognito_allowed_client_ids: str = ""  # Comma-separated allowed client IDs for incoming requests
     cognito_region: str | None = None
+    cognito_token_endpoint: str | None = None  # OAuth2 token endpoint
+    cognito_discovery_url: str | None = None  # OpenID Connect discovery URL
+    cognito_resource_server: str | None = None  # Resource server identifier
+    cognito_scopes: str = ""  # Comma-separated required scopes for access
+
+    @property
+    def cognito_allowed_client_ids_list(self) -> list[str]:
+        """Get allowed client IDs as list."""
+        if not self.cognito_allowed_client_ids:
+            return []
+        return [k.strip() for k in self.cognito_allowed_client_ids.split(",") if k.strip()]
+
+    @property
+    def cognito_scopes_list(self) -> list[str]:
+        """Get scopes as list."""
+        if not self.cognito_scopes:
+            return []
+        return [k.strip() for k in self.cognito_scopes.split(",") if k.strip()]
 
     # Rate Limiting
     rate_limit_enabled: bool = True
@@ -71,15 +90,14 @@ class Settings(BaseSettings):
 
     # MCP API Key Authentication
     mcp_auth_enabled: bool = False  # Enable in production
-    mcp_api_keys: list[str] = []  # Comma-separated in env: "key1,key2,key3"
+    mcp_api_keys: str = ""  # Comma-separated in env: "key1,key2,key3"
 
-    @field_validator("mcp_api_keys", mode="before")
-    @classmethod
-    def parse_api_keys(cls, v):
-        """Parse comma-separated API keys from environment variable."""
-        if isinstance(v, str):
-            return [k.strip() for k in v.split(",") if k.strip()]
-        return v or []
+    @property
+    def mcp_api_keys_list(self) -> list[str]:
+        """Get API keys as list."""
+        if not self.mcp_api_keys:
+            return []
+        return [k.strip() for k in self.mcp_api_keys.split(",") if k.strip()]
 
     # Sandbox Configuration
     sandbox_enabled: bool = True

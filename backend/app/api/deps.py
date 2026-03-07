@@ -1,9 +1,10 @@
 """FastAPI dependencies for dependency injection."""
 
+import logging
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Request, Security, status
-from fastapi.security import APIKeyHeader, APIKeyQuery
+from fastapi import Depends, HTTPException, Header, Request, Security, status
+from fastapi.security import APIKeyHeader, APIKeyQuery, HTTPBearer, HTTPAuthorizationCredentials
 
 from app.core.config import get_settings
 from app.services.mcp_engine import MCPEngine
@@ -12,6 +13,8 @@ from app.services.skill_loader import SkillLoader
 from app.services.metadata_store import MetadataStore
 from app.services.invocation_logger import InvocationLogger
 from app.services.s3_store import S3SkillStore
+
+logger = logging.getLogger(__name__)
 
 # Global instances (initialized in main.py)
 _skill_loader: SkillLoader | None = None
@@ -24,6 +27,9 @@ _s3_store: S3SkillStore | None = None
 # API Key schemes (header and query string)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 api_key_query = APIKeyQuery(name="api_key", auto_error=False)
+
+# Bearer token scheme for Cognito JWT
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def set_skill_loader(loader: SkillLoader) -> None:
@@ -102,20 +108,100 @@ def get_s3_store_optional() -> S3SkillStore | None:
     return _s3_store
 
 
+async def verify_mcp_auth(
+    request: Request,
+    api_key_from_header: str | None = Security(api_key_header),
+    api_key_from_query: str | None = Security(api_key_query),
+    bearer_token: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+) -> dict | str | None:
+    """Verify MCP authentication using multiple methods.
+
+    Supports:
+    1. Cognito JWT Bearer token (preferred for Quick Suite / AgentCore Gateway)
+    2. X-API-Key header (legacy)
+    3. api_key query string (legacy)
+
+    Auth priority: Bearer token > API Key header > API Key query
+
+    Returns:
+        - dict: Decoded JWT payload if Cognito auth is used
+        - str: API key if API key auth is used
+        - None: If auth is disabled
+        
+    Raises:
+        HTTPException 401 if auth is enabled and credentials are invalid.
+    """
+    settings = get_settings()
+
+    # Check if Cognito auth is enabled (takes priority)
+    if settings.cognito_enabled:
+        # Try Bearer token first
+        if bearer_token:
+            try:
+                from app.services.cognito_auth import get_cognito_service
+                
+                cognito_service = get_cognito_service()
+                if cognito_service is None:
+                    logger.error("Cognito service not initialized but cognito_enabled=True")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Authentication service not available",
+                    )
+                
+                # Verify the JWT token
+                payload = await cognito_service.verify_token(bearer_token.credentials)
+                logger.debug(f"Cognito auth successful for client: {payload.get('client_id')}")
+                return payload
+                
+            except ValueError as e:
+                logger.warning(f"Cognito token verification failed: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Invalid token: {e}",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        
+        # No bearer token provided when Cognito is enabled
+        # Check if we should also allow API key fallback
+        if not settings.mcp_auth_enabled:
+            # Cognito is enabled but no token - reject
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authorization token required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+    # Fall back to API key authentication
+    if settings.mcp_auth_enabled:
+        # No API keys configured - allow all (dev mode warning logged elsewhere)
+        if not settings.mcp_api_keys_list:
+            return None
+
+        # Try header first, then query string
+        api_key = api_key_from_header or api_key_from_query
+
+        # Validate the provided key
+        if not api_key or api_key not in settings.mcp_api_keys_list:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or missing API key",
+                headers={"WWW-Authenticate": "ApiKey"},
+            )
+
+        return api_key
+
+    # No auth enabled - allow all requests
+    return None
+
+
+# Legacy function - kept for backward compatibility
 async def verify_mcp_api_key(
     api_key_from_header: str | None = Security(api_key_header),
     api_key_from_query: str | None = Security(api_key_query),
 ) -> str | None:
-    """Verify MCP API Key for authentication.
+    """Verify MCP API Key for authentication (legacy).
 
-    Supports two methods:
-    1. X-API-Key header: -H "X-API-Key: sk-xxx"
-    2. Query string: ?api_key=sk-xxx
-
-    Header takes precedence if both are provided.
-
-    Returns the API key if valid, None if auth is disabled.
-    Raises HTTPException 401 if auth is enabled and key is invalid.
+    Use verify_mcp_auth for new code - it supports both Cognito JWT and API Key.
     """
     settings = get_settings()
 
@@ -124,14 +210,14 @@ async def verify_mcp_api_key(
         return None
 
     # No API keys configured - allow all (dev mode warning logged elsewhere)
-    if not settings.mcp_api_keys:
+    if not settings.mcp_api_keys_list:
         return None
 
     # Try header first, then query string
     api_key = api_key_from_header or api_key_from_query
 
     # Validate the provided key
-    if not api_key or api_key not in settings.mcp_api_keys:
+    if not api_key or api_key not in settings.mcp_api_keys_list:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API key",
@@ -146,3 +232,4 @@ SkillLoaderDep = Annotated[SkillLoader, Depends(get_skill_loader)]
 SessionManagerDep = Annotated[SessionManager, Depends(get_session_manager)]
 MCPEngineDep = Annotated[MCPEngine, Depends(get_mcp_engine)]
 MCPApiKeyDep = Annotated[str | None, Depends(verify_mcp_api_key)]
+MCPAuthDep = Annotated[dict | str | None, Depends(verify_mcp_auth)]
