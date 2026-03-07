@@ -154,7 +154,9 @@ class CodeInterpreterService:
                 base_url = server_url[:-4]
             else:
                 base_url = server_url.rstrip("/")
-            download_url = f"{base_url}/admin/files/stream?s3_key={quote(s3_key, safe='')}"
+            # Only encode special chars that break URLs, preserve / and _
+            # safe='/_' keeps path separators and underscores readable
+            download_url = f"{base_url}/admin/files/stream?s3_key={quote(s3_key, safe='/_')}"
             return {
                 "filename": filename,
                 "s3_uri": s3_uri,
