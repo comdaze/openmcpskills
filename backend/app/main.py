@@ -315,6 +315,7 @@ def create_app() -> FastAPI:
                 "issuer": base,
                 "authorization_endpoint": f"{domain_base}/oauth2/authorize",
                 "token_endpoint": _settings.cognito_token_endpoint,
+                "registration_endpoint": f"{base}/oauth/register",
                 "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
                 "response_types_supported": ["code"],
                 "grant_types_supported": ["client_credentials"],
@@ -334,13 +335,48 @@ def create_app() -> FastAPI:
 
     @app.post("/oauth/register")
     async def oauth_register(request: Request):
-        """Dynamic client registration — accept any client and return an ID."""
-        import secrets as _secrets
+        """RFC 7591 Dynamic Client Registration.
+
+        When Cognito is enabled, creates a real Cognito app client.
+        Otherwise returns a dummy client for local dev.
+        """
         body = await request.json()
+        _settings = get_settings()
+        client_name = body.get("client_name", "mcp-dynamic-client")
+
+        if _settings.cognito_enabled:
+            from app.services.cognito_auth import get_cognito_service
+
+            cognito_service = get_cognito_service()
+            if cognito_service:
+                try:
+                    result = await cognito_service.create_app_client(
+                        client_name=client_name,
+                        scopes=_settings.cognito_scopes_list or ["openmcpskills-api/mcp", "openmcpskills-api/read"],
+                    )
+                    return {
+                        "client_id": result["client_id"],
+                        "client_secret": result["client_secret"],
+                        "client_name": client_name,
+                        "redirect_uris": body.get("redirect_uris", []),
+                        "grant_types": ["client_credentials"],
+                        "response_types": ["code"],
+                        "token_endpoint_auth_method": "client_secret_basic",
+                    }
+                except Exception as e:
+                    logger.error(f"Dynamic client registration failed: {e}")
+                    from fastapi.responses import JSONResponse
+                    return JSONResponse(
+                        status_code=500,
+                        content={"error": "server_error", "error_description": str(e)},
+                    )
+
+        # Fallback: local dev stub
+        import secrets as _secrets
         client_id = _secrets.token_hex(16)
         return {
             "client_id": client_id,
-            "client_name": body.get("client_name", "mcp-client"),
+            "client_name": client_name,
             "redirect_uris": body.get("redirect_uris", []),
             "grant_types": body.get("grant_types", ["authorization_code"]),
             "response_types": body.get("response_types", ["code"]),
