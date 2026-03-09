@@ -420,6 +420,10 @@ async def chat(request: ChatRequest):
             messages.append({"role": "assistant", "content": bedrock_assistant_content})
             messages.append({"role": "user", "content": tool_results})
             body["messages"] = messages
+            logger.info(f"Messages for next Bedrock call (count={len(messages)}):")
+            for i, m in enumerate(messages):
+                content_preview = str(m.get('content', ''))[:200]
+                logger.info(f"  messages[{i}]: role={m.get('role')}, content_preview={content_preview}")
 
         # If we hit max iterations, return last response
         return ChatResponse(
