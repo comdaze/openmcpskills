@@ -67,6 +67,16 @@ remote_env = {
     'CODE_INTERPRETER_SESSION_TIMEOUT': '${CODE_INTERPRETER_SESSION_TIMEOUT}',
     'CODE_INTERPRETER_S3_BUCKET': '${S3_SKILLS_BUCKET_NAME}-${ACCOUNT_ID}',
     'CODE_INTERPRETER_S3_PREFIX': '${S3_OUTPUT_PREFIX}',
+    # Cognito S2S Authentication
+    'COGNITO_ENABLED': '${COGNITO_ENABLED}',
+    'COGNITO_USER_POOL_ID': '${COGNITO_USER_POOL_ID}',
+    'COGNITO_REGION': '${COGNITO_REGION}',
+    'COGNITO_ALLOWED_CLIENT_IDS': '${COGNITO_ALLOWED_CLIENT_IDS}',
+    'COGNITO_TOKEN_ENDPOINT': '${COGNITO_TOKEN_ENDPOINT}',
+    'COGNITO_CLIENT_ID': '${COGNITO_CLIENT_ID}',
+    'COGNITO_SCOPES': '${COGNITO_SCOPES}',
+    # Disable old API Key auth
+    'MCP_AUTH_ENABLED': '${MCP_AUTH_ENABLED}',
 }
 
 # Replace all env vars
@@ -79,9 +89,13 @@ keep = ['family','containerDefinitions','taskRoleArn','executionRoleArn','networ
         'requiresCompatibilities','cpu','memory','runtimePlatform']
 out = {k: td[k] for k in keep if k in td}
 
-# Fargate resources: 2 vCPU, 4 GB memory
+# Fargate resources: 2 vCPU, 4 GB memory on X86_64
 out['cpu'] = '2048'
 out['memory'] = '4096'
+out['runtimePlatform'] = {
+    'cpuArchitecture': 'X86_64',
+    'operatingSystemFamily': 'LINUX'
+}
 
 with open('/tmp/task-def.json', 'w') as f:
     json.dump(out, f)
