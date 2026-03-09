@@ -292,30 +292,8 @@ async def chat(request: ChatRequest):
                         messages.append({"role": msg.role, "content": "\n".join(text_parts)})
                     else:
                         # Complex message with tool_use/tool_result blocks
-                        bedrock_content = []
-                        for block in msg.content:
-                            if isinstance(block, dict):
-                                if block.get("type") == "text":
-                                    bedrock_content.append({"text": block.get("text", "")})
-                                elif block.get("type") == "tool_use":
-                                    bedrock_content.append({
-                                        "toolUse": {
-                                            "toolUseId": block.get("id", ""),
-                                            "name": block.get("name", ""),
-                                            "input": block.get("input", {}),
-                                        }
-                                    })
-                                elif block.get("type") == "tool_result":
-                                    bedrock_content.append({
-                                        "toolResult": {
-                                            "toolUseId": block.get("tool_use_id", ""),
-                                            "content": [{"text": str(block.get("content", ""))}],
-                                        }
-                                    })
-                            elif isinstance(block, str):
-                                bedrock_content.append({"text": block})
-                        if bedrock_content:
-                            messages.append({"role": msg.role, "content": bedrock_content})
+                        # invoke_model uses Anthropic Messages API format — pass blocks as-is
+                        messages.append({"role": msg.role, "content": msg.content})
                 else:
                     messages.append({"role": msg.role, "content": str(msg.content)})
         else:
@@ -402,28 +380,18 @@ async def chat(request: ChatRequest):
                         }
                     })
             
-            # Convert Bedrock response blocks to Bedrock request format
-            bedrock_assistant_content = []
-            for block in content_blocks:
-                if block.get("type") == "text":
-                    bedrock_assistant_content.append({"text": block.get("text", "")})
-                elif block.get("type") == "tool_use":
-                    bedrock_assistant_content.append({
-                        "toolUse": {
-                            "toolUseId": block.get("id", ""),
-                            "name": block.get("name", ""),
-                            "input": block.get("input", {}),
-                        }
-                    })
-
             # Add assistant message and tool results to conversation
-            messages.append({"role": "assistant", "content": bedrock_assistant_content})
-            messages.append({"role": "user", "content": tool_results})
+            # invoke_model uses Anthropic Messages API format (with "type" field)
+            messages.append({"role": "assistant", "content": content_blocks})
+            messages.append({"role": "user", "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tr["toolResult"]["toolUseId"],
+                    "content": tr["toolResult"]["content"][0]["text"],
+                }
+                for tr in tool_results
+            ]})
             body["messages"] = messages
-            logger.info(f"Messages for next Bedrock call (count={len(messages)}):")
-            for i, m in enumerate(messages):
-                content_preview = str(m.get('content', ''))[:200]
-                logger.info(f"  messages[{i}]: role={m.get('role')}, content_preview={content_preview}")
 
         # If we hit max iterations, return last response
         return ChatResponse(
