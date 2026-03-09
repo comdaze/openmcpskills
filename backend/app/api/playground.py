@@ -12,6 +12,7 @@ import json
 import httpx
 
 from app.core.config import get_settings
+from app.api.deps import INTERNAL_BYPASS_TOKEN
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+    content: List[Dict[str, Any]] = []
     toolCalls: List[Dict[str, Any]] = []
 
 
@@ -76,6 +78,7 @@ async def get_mcp_tools(mcp_url: str) -> List[Dict[str, Any]]:
             response = await client.post(
                 local_url,
                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers={"X-Internal-Token": INTERNAL_BYPASS_TOKEN},
                 timeout=10.0
             )
             if response.status_code == 200:
@@ -116,6 +119,7 @@ async def call_mcp_tool(mcp_url: str, tool_name: str, tool_input: Dict[str, Any]
                         "arguments": tool_input
                     }
                 },
+                headers={"X-Internal-Token": INTERNAL_BYPASS_TOKEN},
                 timeout=30.0
             )
             if response.status_code == 200:
@@ -199,6 +203,7 @@ async def execute_code_in_sandbox(mcp_url: str, skill_name: str, code: str, lang
                         "language": language
                     }
                 },
+                headers={"X-Internal-Token": INTERNAL_BYPASS_TOKEN},
                 timeout=300.0  # 5 minutes for code execution
             )
             logger.info(f"Code execution response status: {response.status_code}")
@@ -359,11 +364,16 @@ async def chat(request: ChatRequest):
             
             # If no tool use, return the response
             if stop_reason != "tool_use":
-                if "content" in response_body and len(response_body["content"]) > 0:
-                    assistant_message = response_body["content"][0].get("text", "")
+                raw_content = response_body.get("content", [])
+                if raw_content:
+                    assistant_message = raw_content[0].get("text", "")
                 else:
                     assistant_message = "Sorry, I couldn't generate a response."
-                return ChatResponse(response=assistant_message, toolCalls=all_tool_calls)
+                return ChatResponse(
+                    response=assistant_message,
+                    content=raw_content,
+                    toolCalls=all_tool_calls,
+                )
             
             # Handle tool use
             content_blocks = response_body.get("content", [])
@@ -398,7 +408,11 @@ async def chat(request: ChatRequest):
             body["messages"] = messages
 
         # If we hit max iterations, return last response
-        return ChatResponse(response="Maximum tool use iterations reached.", toolCalls=all_tool_calls)
+        return ChatResponse(
+            response="Maximum tool use iterations reached.",
+            content=[{"type": "text", "text": "Maximum tool use iterations reached."}],
+            toolCalls=all_tool_calls,
+        )
 
     except Exception as e:
         logger.error(f"Chat error: {str(e)}")

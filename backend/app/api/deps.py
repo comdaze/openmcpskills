@@ -1,6 +1,7 @@
 """FastAPI dependencies for dependency injection."""
 
 import logging
+import secrets
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Header, Request, Security, status
@@ -15,6 +16,10 @@ from app.services.invocation_logger import InvocationLogger
 from app.services.s3_store import S3SkillStore
 
 logger = logging.getLogger(__name__)
+
+# Internal bypass token for server-to-server calls (e.g. playground → MCP).
+# Generated once per process; never exposed externally.
+INTERNAL_BYPASS_TOKEN = secrets.token_hex(32)
 
 # Global instances (initialized in main.py)
 _skill_loader: SkillLoader | None = None
@@ -217,6 +222,11 @@ async def verify_mcp_auth(
     bearer_token: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
 ) -> dict | str | None:
     """Verify MCP authentication — requires openmcpskills-api/mcp scope for JWT."""
+    # Allow internal server-to-server calls (e.g. playground → MCP on localhost)
+    internal_token = request.headers.get("x-internal-token")
+    if internal_token and internal_token == INTERNAL_BYPASS_TOKEN:
+        return {"sub": "internal-playground"}
+
     return await _verify_auth_internal(
         bearer_token, api_key_from_header, api_key_from_query,
         required_scopes=["openmcpskills-api/mcp"],
