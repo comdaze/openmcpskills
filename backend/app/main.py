@@ -5,7 +5,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import admin_router, health_router, mcp_router, playground_router
@@ -49,6 +49,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     s3_store = None
     code_interpreter = None
 
+    # Initialize persistent API key store (always enabled, independent of storage_backend)
+    from app.services.api_key_store import ApiKeyStore, set_api_key_store
+
+    api_key_store = ApiKeyStore()
+    try:
+        key_count = await api_key_store.load_all()
+        set_api_key_store(api_key_store)
+        logger.info(f"API key store initialized ({key_count} active keys)")
+    except Exception as e:
+        logger.warning(f"API key store initialization failed (non-fatal): {e}")
+        set_api_key_store(api_key_store)
+
     if settings.storage_backend == "s3":
         from app.services.s3_store import S3SkillStore
         from app.services.metadata_store import MetadataStore
@@ -78,6 +90,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             s3_prefix=settings.code_interpreter_s3_prefix,
         )
         logger.info("Code Interpreter service initialized")
+
+    # Initialize Cognito authentication service if enabled
+    if settings.cognito_enabled:
+        from app.services.cognito_auth import CognitoAuthService, set_cognito_service
+        
+        cognito_region = settings.cognito_region or settings.aws_region
+        if not settings.cognito_user_pool_id:
+            logger.error("Cognito enabled but COGNITO_USER_POOL_ID not set")
+        else:
+            cognito_service = CognitoAuthService(
+                region=cognito_region,
+                user_pool_id=settings.cognito_user_pool_id,
+                allowed_client_ids=settings.cognito_allowed_client_ids_list,
+            )
+            set_cognito_service(cognito_service)
+            logger.info(f"Cognito S2S authentication enabled")
+            logger.info(f"  User Pool ID: {settings.cognito_user_pool_id}")
+            logger.info(f"  Region: {cognito_region}")
+            if settings.cognito_allowed_client_ids_list:
+                logger.info(f"  Allowed Client IDs: {settings.cognito_allowed_client_ids_list}")
+            else:
+                logger.info(f"  Allowed Client IDs: (any)")
+    else:
+        logger.info("Cognito authentication: disabled")
 
     mcp_engine = MCPEngine(
         skill_loader,
@@ -209,6 +245,133 @@ def create_app() -> FastAPI:
     app.include_router(mcp_router)
     app.include_router(admin_router)
     app.include_router(playground_router)
+
+    # MCP Streamable HTTP OAuth endpoints
+    # Kiro and other MCP clients do OAuth discovery before connecting.
+    # We provide minimal endpoints so clients can complete the handshake.
+    # When Cognito is enabled, point to the real Cognito token endpoint.
+
+    @app.get("/.well-known/oauth-protected-resource")
+    async def oauth_protected_resource():
+        """RFC 9728 Protected Resource Metadata — tells clients where to authenticate."""
+        _settings = get_settings()
+        resource = _settings.mcp_server_url or "http://127.0.0.1:8000/mcp"
+        # Always point to our own server for authorization_servers.
+        # Our /.well-known/oauth-authorization-server proxies the real
+        # Cognito metadata (token_endpoint, scopes, etc.) since Cognito
+        # itself doesn't serve RFC 8414 metadata.
+        base = resource.removesuffix("/mcp")
+        return {
+            "resource": resource,
+            "authorization_servers": [base],
+        }
+
+    @app.get("/.well-known/openid-configuration")
+    async def openid_configuration():
+        """OpenID Connect Discovery — QuickSuite checks this during setup."""
+        _settings = get_settings()
+        if _settings.cognito_enabled and _settings.cognito_token_endpoint:
+            resource = _settings.mcp_server_url or "http://127.0.0.1:8000/mcp"
+            base = resource.removesuffix("/mcp")
+            cognito_issuer = f"https://cognito-idp.{_settings.cognito_region or 'us-east-1'}.amazonaws.com/{_settings.cognito_user_pool_id}"
+            scopes = _settings.cognito_scopes_list or ["openmcpskills-api/mcp", "openmcpskills-api/read"]
+            return {
+                "issuer": cognito_issuer,
+                "authorization_endpoint": f"{_settings.cognito_token_endpoint.rsplit('/oauth2/', 1)[0]}/oauth2/authorize",
+                "token_endpoint": _settings.cognito_token_endpoint,
+                "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
+                "jwks_uri": f"{cognito_issuer}/.well-known/jwks.json",
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["client_credentials", "authorization_code"],
+                "scopes_supported": scopes,
+                "subject_types_supported": ["public"],
+                "id_token_signing_alg_values_supported": ["RS256"],
+            }
+        base_url = "http://127.0.0.1:8000"
+        return {
+            "issuer": base_url,
+            "authorization_endpoint": f"{base_url}/oauth/authorize",
+            "token_endpoint": f"{base_url}/oauth/token",
+            "jwks_uri": f"{base_url}/.well-known/jwks.json",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code"],
+            "scopes_supported": ["openid"],
+            "subject_types_supported": ["public"],
+            "id_token_signing_alg_values_supported": ["RS256"],
+        }
+
+    @app.get("/.well-known/oauth-authorization-server")
+    async def oauth_metadata():
+        _settings = get_settings()
+        if _settings.cognito_enabled and _settings.cognito_token_endpoint:
+            # Serve Cognito token endpoint via our own OAuth metadata.
+            # issuer must match the authorization_servers URL in the
+            # protected resource metadata (i.e. our own base URL).
+            resource = _settings.mcp_server_url or "http://127.0.0.1:8000/mcp"
+            base = resource.removesuffix("/mcp")
+            scopes = _settings.cognito_scopes_list or ["openmcpskills-api/mcp", "openmcpskills-api/read"]
+            domain_base = _settings.cognito_token_endpoint.rsplit("/oauth2/token", 1)[0]
+            return {
+                "issuer": base,
+                "authorization_endpoint": f"{domain_base}/oauth2/authorize",
+                "token_endpoint": _settings.cognito_token_endpoint,
+                "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["client_credentials"],
+                "scopes_supported": scopes,
+            }
+        # Fallback: local dev stub
+        base_url = "http://127.0.0.1:8000"
+        return {
+            "issuer": base_url,
+            "authorization_endpoint": f"{base_url}/oauth/authorize",
+            "token_endpoint": f"{base_url}/oauth/token",
+            "registration_endpoint": f"{base_url}/oauth/register",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code"],
+            "code_challenge_methods_supported": ["S256"],
+        }
+
+    @app.post("/oauth/register")
+    async def oauth_register(request: Request):
+        """Dynamic client registration — accept any client and return an ID."""
+        import secrets as _secrets
+        body = await request.json()
+        client_id = _secrets.token_hex(16)
+        return {
+            "client_id": client_id,
+            "client_name": body.get("client_name", "mcp-client"),
+            "redirect_uris": body.get("redirect_uris", []),
+            "grant_types": body.get("grant_types", ["authorization_code"]),
+            "response_types": body.get("response_types", ["code"]),
+            "token_endpoint_auth_method": "none",
+        }
+
+    @app.get("/oauth/authorize")
+    async def oauth_authorize(
+        response_type: str = "",
+        client_id: str = "",
+        redirect_uri: str = "",
+        state: str = "",
+        code_challenge: str = "",
+        code_challenge_method: str = "",
+    ):
+        """Authorization endpoint — immediately redirect with a code."""
+        import secrets as _secrets
+        from starlette.responses import RedirectResponse
+        code = _secrets.token_hex(16)
+        sep = "&" if "?" in redirect_uri else "?"
+        return RedirectResponse(f"{redirect_uri}{sep}code={code}&state={state}")
+
+    @app.post("/oauth/token")
+    async def oauth_token(request: Request):
+        """Token endpoint — return a dummy bearer token."""
+        import secrets as _secrets
+        return {
+            "access_token": _secrets.token_hex(32),
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        }
 
     return app
 

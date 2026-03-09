@@ -8,8 +8,11 @@ Supports uploading generated files to S3 via execution role.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import secrets
+import string
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -19,6 +22,13 @@ import boto3
 from botocore.exceptions import ClientError
 
 from app.core.config import get_settings
+
+
+def generate_short_id(length: int = 8) -> str:
+    """Generate a URL-safe short ID without problematic characters."""
+    # Use only alphanumeric chars - no underscore, dash, or special chars
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 logger = logging.getLogger(__name__)
 
@@ -144,17 +154,36 @@ class CodeInterpreterService:
         result = self._run_command(session_id, f"aws s3 cp '{filename}' '{s3_uri}'")
         if result["exit_code"] == 0:
             logger.info(f"Uploaded {filename} to {s3_uri}")
-            # Build download URL via backend streaming proxy to avoid
-            # presigned URL issues with temporary STS credentials on ECS
             settings = get_settings()
-            from urllib.parse import quote
             server_url = settings.mcp_server_url
             # Remove trailing /mcp path to get the base URL
             if server_url.endswith("/mcp"):
                 base_url = server_url[:-4]
             else:
                 base_url = server_url.rstrip("/")
-            download_url = f"{base_url}/admin/files/stream?s3_key={quote(s3_key, safe='')}"
+            
+            # Generate short link ID and store mapping in DynamoDB
+            short_id = generate_short_id(8)
+            try:
+                dynamodb = boto3.resource("dynamodb", region_name=settings.aws_region)
+                table = dynamodb.Table(settings.dynamodb_sessions_table)
+                table.put_item(Item={
+                    "session_id": f"file:{short_id}",
+                    "s3_key": s3_key,
+                    "s3_bucket": self.s3_bucket,
+                    "filename": basename,
+                    "created_at": int(time.time()),
+                    "ttl": int(time.time()) + 86400 * 30,  # 30 days expiry
+                })
+                # Use short URL format: /admin/f/{short_id}
+                download_url = f"{base_url}/admin/f/{short_id}"
+                logger.info(f"Created short link: {download_url} -> {s3_key}")
+            except Exception as e:
+                # Fall back to long URL if DynamoDB fails
+                logger.warning(f"Failed to create short link, using long URL: {e}")
+                from urllib.parse import quote
+                download_url = f"{base_url}/admin/files/stream?s3_key={quote(s3_key, safe='/_')}"
+            
             return {
                 "filename": filename,
                 "s3_uri": s3_uri,

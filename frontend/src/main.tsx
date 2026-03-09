@@ -2,16 +2,30 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
 import App from "./App.tsx";
-import { Amplify } from 'aws-amplify'
-import outputs from "../amplify_outputs.json";
-import { ThemeProvider, amplifyTheme } from "./lib/amplify-theme";
 
-Amplify.configure(outputs);
+// Configure Amplify if available (optional)
+async function initApp() {
+  let authConfigured = false;
+  try {
+    const { Amplify } = await import('aws-amplify');
+    const outputs = await import("../amplify_outputs.json");
+    const config = outputs.default || outputs;
+    Amplify.configure(config);
+    // Check if auth section is actually present
+    authConfigured = !!(config as any)?.auth;
+  } catch {
+    // Amplify not configured - running without authentication
+    console.log('Running without Amplify authentication');
+  }
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <ThemeProvider theme={amplifyTheme}>
+  // Expose flag for use-auth hook
+  (window as any).__AMPLIFY_AUTH_CONFIGURED__ = authConfigured;
+
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
       <App />
-    </ThemeProvider>
-  </StrictMode>
-);
+    </StrictMode>
+  );
+}
+
+initApp();

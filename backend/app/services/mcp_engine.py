@@ -108,7 +108,10 @@ class MCPEngine:
         is_notification = msg_id is None
 
         # Log all incoming requests for debugging
-        logger.info(f"MCP request: method={method}, id={msg_id}, params_keys={list(params.keys()) if params else []}")
+        if method == "tools/call":
+            logger.info(f"MCP request: method={method}, id={msg_id}, tool={params.get('name')}, arguments={params.get('arguments', {})}")
+        else:
+            logger.info(f"MCP request: method={method}, id={msg_id}, params_keys={list(params.keys()) if params else []}")
 
         # Route to handler
         try:
@@ -121,7 +124,10 @@ class MCPEngine:
             elif method == "tools/list":
                 return await self._handle_tools_list(msg_id, params, session_id)
             elif method == "tools/call":
-                return await self._handle_tools_call(msg_id, params, session_id)
+                result = await self._handle_tools_call(msg_id, params, session_id)
+                result_str = str(result)[:500] if result else "None"
+                logger.info(f"tools/call response (truncated): {result_str}")
+                return result
             elif method == "code/execute":
                 return await self._handle_code_execute(msg_id, params, session_id)
             elif method == "prompts/list":
