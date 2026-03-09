@@ -340,9 +340,12 @@ def create_app() -> FastAPI:
         When Cognito is enabled, creates a real Cognito app client.
         Otherwise returns a dummy client for local dev.
         """
+        import re
         body = await request.json()
         _settings = get_settings()
-        client_name = body.get("client_name", "mcp-dynamic-client")
+        raw_name = body.get("client_name", "mcp-dynamic-client")
+        # Cognito only allows: [\w\s+=,.@-]+
+        client_name = re.sub(r'[^\w\s+=,.@-]', '', raw_name).strip() or "mcp-dynamic-client"
 
         if _settings.cognito_enabled:
             from app.services.cognito_auth import get_cognito_service
