@@ -249,10 +249,77 @@ def create_app() -> FastAPI:
     # MCP Streamable HTTP OAuth endpoints
     # Kiro and other MCP clients do OAuth discovery before connecting.
     # We provide minimal endpoints so clients can complete the handshake.
-    base_url = "http://127.0.0.1:8000"
+    # When Cognito is enabled, point to the real Cognito token endpoint.
+
+    @app.get("/.well-known/oauth-protected-resource")
+    async def oauth_protected_resource():
+        """RFC 9728 Protected Resource Metadata — tells clients where to authenticate."""
+        _settings = get_settings()
+        resource = _settings.mcp_server_url or "http://127.0.0.1:8000/mcp"
+        # Always point to our own server for authorization_servers.
+        # Our /.well-known/oauth-authorization-server proxies the real
+        # Cognito metadata (token_endpoint, scopes, etc.) since Cognito
+        # itself doesn't serve RFC 8414 metadata.
+        base = resource.removesuffix("/mcp")
+        return {
+            "resource": resource,
+            "authorization_servers": [base],
+        }
+
+    @app.get("/.well-known/openid-configuration")
+    async def openid_configuration():
+        """OpenID Connect Discovery — QuickSuite checks this during setup."""
+        _settings = get_settings()
+        if _settings.cognito_enabled and _settings.cognito_token_endpoint:
+            resource = _settings.mcp_server_url or "http://127.0.0.1:8000/mcp"
+            base = resource.removesuffix("/mcp")
+            cognito_issuer = f"https://cognito-idp.{_settings.cognito_region or 'us-east-1'}.amazonaws.com/{_settings.cognito_user_pool_id}"
+            scopes = _settings.cognito_scopes_list or ["openmcpskills-api/mcp", "openmcpskills-api/read"]
+            return {
+                "issuer": cognito_issuer,
+                "authorization_endpoint": f"{_settings.cognito_token_endpoint.rsplit('/oauth2/', 1)[0]}/oauth2/authorize",
+                "token_endpoint": _settings.cognito_token_endpoint,
+                "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
+                "jwks_uri": f"{cognito_issuer}/.well-known/jwks.json",
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["client_credentials", "authorization_code"],
+                "scopes_supported": scopes,
+                "subject_types_supported": ["public"],
+                "id_token_signing_alg_values_supported": ["RS256"],
+            }
+        base_url = "http://127.0.0.1:8000"
+        return {
+            "issuer": base_url,
+            "authorization_endpoint": f"{base_url}/oauth/authorize",
+            "token_endpoint": f"{base_url}/oauth/token",
+            "jwks_uri": f"{base_url}/.well-known/jwks.json",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code"],
+            "scopes_supported": ["openid"],
+            "subject_types_supported": ["public"],
+            "id_token_signing_alg_values_supported": ["RS256"],
+        }
 
     @app.get("/.well-known/oauth-authorization-server")
     async def oauth_metadata():
+        _settings = get_settings()
+        if _settings.cognito_enabled and _settings.cognito_token_endpoint:
+            # Serve Cognito token endpoint via our own OAuth metadata.
+            # issuer must match the authorization_servers URL in the
+            # protected resource metadata (i.e. our own base URL).
+            resource = _settings.mcp_server_url or "http://127.0.0.1:8000/mcp"
+            base = resource.removesuffix("/mcp")
+            scopes = _settings.cognito_scopes_list or ["openmcpskills-api/mcp", "openmcpskills-api/read"]
+            return {
+                "issuer": base,
+                "token_endpoint": _settings.cognito_token_endpoint,
+                "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["client_credentials"],
+                "scopes_supported": scopes,
+            }
+        # Fallback: local dev stub
+        base_url = "http://127.0.0.1:8000"
         return {
             "issuer": base_url,
             "authorization_endpoint": f"{base_url}/oauth/authorize",

@@ -1162,3 +1162,82 @@ async def create_cognito_client(
         scopes=scopes,
         message="Client created successfully. Store the client_secret securely — it cannot be retrieved again.",
     )
+
+
+class RevokeCognitoClientRequest(BaseModel):
+    """Request to revoke (delete) a Cognito app client."""
+    client_id: str
+
+
+@router.post("/cognito/revoke-client")
+async def revoke_cognito_client(
+    req: RevokeCognitoClientRequest,
+    _auth: AdminAuthDep = None,
+) -> dict:
+    """Delete a Cognito app client, revoking all its tokens."""
+    settings = get_settings()
+
+    if not settings.cognito_enabled or not settings.cognito_user_pool_id:
+        raise HTTPException(status_code=400, detail="Cognito authentication is not enabled")
+
+    import aioboto3
+
+    session = aioboto3.Session()
+    try:
+        async with session.client("cognito-idp", region_name=settings.cognito_region or settings.aws_region) as cog:
+            await cog.delete_user_pool_client(
+                UserPoolId=settings.cognito_user_pool_id,
+                ClientId=req.client_id,
+            )
+    except Exception as e:
+        logger.error("Failed to revoke Cognito client %s: %s", req.client_id, e)
+        raise HTTPException(status_code=500, detail=f"Failed to revoke client: {e}")
+
+    return {"message": f"Cognito client {req.client_id} revoked successfully"}
+
+
+class CognitoClientInfo(BaseModel):
+    """Info about an existing Cognito app client (no secrets)."""
+    client_id: str
+    client_name: str
+    created_at: str
+    scopes: list[str]
+
+
+@router.get("/cognito/clients", response_model=list[CognitoClientInfo])
+async def list_cognito_clients(_auth: AdminAuthDep = None) -> list[CognitoClientInfo]:
+    """List all Cognito app clients (without secrets)."""
+    settings = get_settings()
+
+    if not settings.cognito_enabled or not settings.cognito_user_pool_id:
+        return []
+
+    import aioboto3
+
+    session = aioboto3.Session()
+    clients_out: list[CognitoClientInfo] = []
+    try:
+        async with session.client("cognito-idp", region_name=settings.cognito_region or settings.aws_region) as cog:
+            resp = await cog.list_user_pool_clients(
+                UserPoolId=settings.cognito_user_pool_id, MaxResults=60
+            )
+            for c in resp.get("UserPoolClients", []):
+                detail = await cog.describe_user_pool_client(
+                    UserPoolId=settings.cognito_user_pool_id,
+                    ClientId=c["ClientId"],
+                )
+                uc = detail["UserPoolClient"]
+                # Only show clients with client_credentials flow (M2M)
+                if "client_credentials" not in uc.get("AllowedOAuthFlows", []):
+                    continue
+                clients_out.append(CognitoClientInfo(
+                    client_id=uc["ClientId"],
+                    client_name=uc.get("ClientName", ""),
+                    created_at=uc.get("CreationDate", "").isoformat() if hasattr(uc.get("CreationDate", ""), "isoformat") else str(uc.get("CreationDate", "")),
+                    scopes=uc.get("AllowedOAuthScopes", []),
+                ))
+    except Exception as e:
+        logger.error("Failed to list Cognito clients: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to list clients: {e}")
+
+    return clients_out

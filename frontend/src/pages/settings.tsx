@@ -47,6 +47,13 @@ interface ApiKeyInfo {
   status: string
 }
 
+interface CognitoClientInfo {
+  client_id: string
+  client_name: string
+  created_at: string
+  scopes: string[]
+}
+
 export function SettingsPage() {
   const [info, setInfo] = useState<ServerInfo | null>(null)
   const [health, setHealth] = useState<HealthStatus | null>(null)
@@ -80,8 +87,16 @@ export function SettingsPage() {
   } | null>(null)
   const [isCreatingClient, setIsCreatingClient] = useState(false)
 
+  // Cognito clients list
+  const [cognitoClients, setCognitoClients] = useState<CognitoClientInfo[]>([])
+  const [revokeCognitoClientId, setRevokeCognitoClientId] = useState<string | null>(null)
+
   const loadApiKeys = () => {
     apiFetch<ApiKeyInfo[]>('/admin/api-keys').then(setApiKeys).catch(() => setApiKeys([]))
+  }
+
+  const loadCognitoClients = () => {
+    apiFetch<CognitoClientInfo[]>('/admin/cognito/clients').then(setCognitoClients).catch(() => setCognitoClients([]))
   }
 
   useEffect(() => {
@@ -95,6 +110,7 @@ export function SettingsPage() {
       })
     })
     loadApiKeys()
+    loadCognitoClients()
 
     // Load saved settings from localStorage
     const savedApiKey = localStorage.getItem('bedrock_api_key') || ''
@@ -171,10 +187,25 @@ export function SettingsPage() {
         body: JSON.stringify({ client_name: cognitoClientName || 'mcp-client' }),
       })
       setCognitoCredentials(result)
+      loadCognitoClients()
     } catch (e: any) {
       alert(e.message || 'Failed to create client')
     } finally {
       setIsCreatingClient(false)
+    }
+  }
+
+  const handleRevokeCognitoClient = async (clientId: string) => {
+    try {
+      await apiFetch('/admin/cognito/revoke-client', {
+        method: 'POST',
+        body: JSON.stringify({ client_id: clientId }),
+      })
+      loadCognitoClients()
+    } catch (e: any) {
+      alert(e.message || 'Failed to revoke client')
+    } finally {
+      setRevokeCognitoClientId(null)
     }
   }
 
@@ -564,12 +595,71 @@ export function SettingsPage() {
               <Plus className="h-4 w-4 mr-2" />
               Request Credentials
             </Button>
-            <p className="text-xs text-muted-foreground">
-              Creates a new Cognito app client with Client Credentials flow. The client secret is shown once and cannot be retrieved later.
-            </p>
+            {cognitoClients.length > 0 && (
+              <div className="space-y-2">
+                {cognitoClients.map((client) => (
+                  <div
+                    key={client.client_id}
+                    className="flex items-center justify-between p-3 rounded-lg border"
+                  >
+                    <div className="space-y-1 min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-sm">{client.client_name}</span>
+                        <Badge variant="default" className="text-xs">M2M</Badge>
+                      </div>
+                      <div className="text-xs text-muted-foreground font-mono">{client.client_id}</div>
+                      <div className="text-xs text-muted-foreground">
+                        Created: {new Date(client.created_at).toLocaleDateString()}
+                        {client.scopes.length > 0 && (
+                          <> &middot; Scopes: {client.scopes.join(', ')}</>
+                        )}
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => setRevokeCognitoClientId(client.client_id)}
+                      title="Revoke client"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {cognitoClients.length === 0 && (
+              <p className="text-sm text-muted-foreground text-center py-4">
+                No Cognito clients created yet. Request credentials to create one.
+              </p>
+            )}
           </CardContent>
         </Card>
       )}
+
+      {/* Revoke Cognito Client Confirmation Dialog */}
+      <Dialog open={!!revokeCognitoClientId} onOpenChange={() => setRevokeCognitoClientId(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Revoke Cognito Client</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to revoke this Cognito client? Any services using its credentials will lose access immediately.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRevokeCognitoClientId(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => revokeCognitoClientId && handleRevokeCognitoClient(revokeCognitoClientId)}
+            >
+              Revoke
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Cognito Create Client Dialog */}
       <Dialog open={showCognitoDialog} onOpenChange={setShowCognitoDialog}>

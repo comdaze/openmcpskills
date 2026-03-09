@@ -189,6 +189,14 @@ async def _verify_auth_internal(
             if not store or store.active_count == 0:
                 return None
 
+        # Use Bearer challenge when Cognito is the primary auth method
+        # so OAuth clients (e.g. QuickSuite) can discover auth properly
+        if settings.cognito_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authorization required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API key",
@@ -222,10 +230,21 @@ async def verify_admin_auth(
 
     When all auth is disabled (cognito_enabled=False AND mcp_auth_enabled=False),
     returns None (passthrough) to avoid chicken-and-egg issues during setup.
+
+    Same-origin requests from the frontend dashboard are allowed without credentials,
+    since the frontend itself is served behind its own auth layer.
     """
     settings = get_settings()
     if not settings.cognito_enabled and not settings.mcp_auth_enabled:
         return None
+
+    # Allow same-origin requests from the frontend dashboard (Referer/Origin check)
+    origin = request.headers.get("origin", "")
+    referer = request.headers.get("referer", "")
+    base_url = settings.mcp_server_url.removesuffix("/mcp") if settings.mcp_server_url else ""
+    if base_url and (origin == base_url or referer.startswith(base_url)):
+        return {"sub": "frontend-admin", "origin": origin or referer}
+
     return await _verify_auth_internal(
         bearer_token, api_key_from_header, api_key_from_query,
         required_scopes=["openmcpskills-api/admin"],
