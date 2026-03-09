@@ -24,7 +24,7 @@ Open MCP Skills 是一个**云原生、可动态扩展**的 MCP (Model Context P
 - 🎯 **标准化**: 完全兼容 [Claude Skills 标准](https://docs.anthropic.com/en/docs/claude-skills)
 - ☁️ **云原生**: 容器化部署,支持弹性伸缩和多实例同步
 - 🔄 **实时管理**: Web 界面实时管理技能,无需重启服务
-- 🔒 **安全隔离**: 沙箱执行环境,密钥安全管理
+- 🔒 **安全认证**: Cognito JWT + API Key 双认证,OAuth 2.0 发现,沙箱代码执行
 - 🚀 **高性能**: 懒加载机制,预热缓存,毫秒级响应
 - 📦 **丰富技能库**: 内置 20+ 生产级技能(文档处理、代码生成、数据分析等)
 
@@ -35,6 +35,7 @@ Open MCP Skills 是一个**云原生、可动态扩展**的 MCP (Model Context P
 - **实时同步**: 基于 Redis Pub/Sub 的多实例技能同步
 - **代码解释器**: 集成 AWS Bedrock Code Interpreter,支持安全的代码执行
 - **可观测性**: 完整的日志、指标和调用追踪
+- **OAuth 2.0 发现**: 兼容 RFC 9728 / RFC 8414, 支持 QuickSuite、Kiro 等标准客户端
 
 ---
 
@@ -45,9 +46,10 @@ Open MCP Skills 是一个**云原生、可动态扩展**的 MCP (Model Context P
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         MCP Clients                                  │
-│              (Claude Code, AI Agents, Custom Apps)                   │
+│     (Claude Code, Kiro, QuickSuite, AI Agents, Custom Apps)         │
 └─────────────────────────┬───────────────────────────────────────────┘
                           │ Streamable HTTP (MCP Protocol)
+                          │ Auth: Bearer JWT / X-API-Key / ?api_key=
                           ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Application Load Balancer                         │
@@ -64,15 +66,13 @@ Open MCP Skills 是一个**云原生、可动态扩展**的 MCP (Model Context P
        │                 │                 │
        └────────────┬────┴────┬────────────┘
                     │         │
-        ┌───────────▼───┐ ┌───▼───────────┐
-        │     Redis     │ │   DynamoDB    │
-        │   (Pub/Sub)   │ │  (Metadata)   │
-        └───────────────┘ └───────────────┘
-                    │
-            ┌───────▼───────┐
-            │      S3       │
-            │ (Skills存储)  │
-            └───────────────┘
+   ┌────────────────┼─────────┼────────────────┐
+   ▼                ▼         ▼                ▼
+┌─────────┐  ┌───────────┐ ┌───────────┐ ┌─────────┐
+│ Cognito │  │   Redis   │ │ DynamoDB  │ │   S3    │
+│(JWT Auth)│  │ (Pub/Sub) │ │(Metadata+ │ │(Skills) │
+│         │  │           │ │ API Keys) │ │         │
+└─────────┘  └───────────┘ └───────────┘ └─────────┘
 ```
 
 ### 核心组件
@@ -80,14 +80,16 @@ Open MCP Skills 是一个**云原生、可动态扩展**的 MCP (Model Context P
 | 组件 | 技术栈 | 说明 |
 |------|--------|------|
 | **后端服务** | Python 3.11 + FastAPI | MCP 协议处理、技能管理 |
-| **前端管理** | React 18 + Vite | 技能管理界面 |
-| **MCP 协议** | mcp-python SDK | 官方 Python SDK |
+| **前端管理** | React 18 + Vite + Amplify Auth | 技能管理、用户登录、凭证管理 |
+| **认证** | Cognito + DynamoDB | JWT (OAuth 2.0 S2S) + 持久化 API Key |
+| **MCP 协议** | Streamable HTTP | JSON-RPC 2.0, 多协议版本协商 |
 | **容器化** | Docker + ECS Fargate | 无服务器容器部署 |
 | **负载均衡** | AWS ALB | HTTPS 终止、健康检查 |
 | **缓存同步** | Redis 7 | Pub/Sub 多实例同步 |
-| **元数据存储** | DynamoDB | 技能元数据、调用统计 |
+| **元数据存储** | DynamoDB | 技能元数据、调用统计、API Key |
 | **文件存储** | S3 | 技能包存储 |
 | **代码执行** | Bedrock Code Interpreter | 安全的代码沙箱 |
+| **MCP 代理** | mcp-proxy.mjs | stdio→HTTP 桥接, OAuth/API Key |
 
 ---
 
@@ -209,9 +211,11 @@ my-skill.zip
 
 ### 4. 安全性
 
+- **双认证模式**: Cognito JWT (OAuth 2.0 S2S) + 持久化 API Key，可同时启用
+- **OAuth 2.0 发现**: 支持 RFC 9728 / RFC 8414 / OpenID Connect 自动发现
 - **沙箱执行**: 代码在隔离环境中运行
-- **权限控制**: 基于 IAM 的细粒度权限
-- **密钥管理**: AWS Secrets Manager 安全存储
+- **Admin 保护**: 管理端点需认证，同源前端请求自动放行
+- **凭证自助**: 前端可生成/吊销 API Key 和 Cognito 客户端
 - **审计日志**: 完整的调用链追踪
 
 ### 5. 开发体验
@@ -244,7 +248,7 @@ my-skill.zip
 #### 1. 克隆项目
 
 ```bash
-git clone https://github.com/yourusername/open-mcp-skills.git
+git clone https://github.com/comdaze/openmcpskills.git
 cd open-mcp-skills
 ```
 
@@ -287,16 +291,32 @@ curl -X POST http://localhost:8000/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-### 配置 Claude Code
+### 配置 Claude Code / Kiro
 
-在 Claude Code 中添加 MCP 服务器:
+在 `.mcp.json` 中添加 MCP 服务器:
 
 ```json
 {
   "mcpServers": {
     "open-mcp-skills": {
-      "url": "http://localhost:8000/mcp",
-      "transport": "streamable-http"
+      "type": "http",
+      "url": "http://localhost:8000/mcp"
+    }
+  }
+}
+```
+
+生产环境(需认证):
+
+```json
+{
+  "mcpServers": {
+    "open-mcp-skills": {
+      "type": "http",
+      "url": "https://your-server.com/mcp",
+      "headers": {
+        "X-API-Key": "sk-mcp-your-api-key"
+      }
     }
   }
 }
@@ -339,6 +359,70 @@ curl -X POST http://localhost:8000/mcp \
 
 ---
 
+## 🔐 认证配置
+
+### 认证模式
+
+Open MCP Skills 支持三种认证方式，可同时启用:
+
+| 方式 | 适用场景 | 配置 |
+|------|---------|------|
+| **Cognito JWT** | QuickSuite、标准 OAuth 客户端 | `COGNITO_ENABLED=true` |
+| **API Key** | Claude Code、Kiro、脚本调用 | `MCP_AUTH_ENABLED=true` |
+| **无认证** | 本地开发 | 两者都不启用 |
+
+### 客户端连接示例
+
+#### Claude Code / Kiro (API Key)
+```json
+{
+  "mcpServers": {
+    "open-mcp-skills": {
+      "url": "https://your-server.com/mcp",
+      "headers": { "X-API-Key": "sk-mcp-xxxxx" }
+    }
+  }
+}
+```
+
+#### Query Parameter 方式
+```
+https://your-server.com/mcp?api_key=sk-mcp-xxxxx
+```
+
+#### QuickSuite (OAuth 2.0)
+OAuth 自动发现: 客户端从 `/.well-known/oauth-protected-resource` 开始，自动获取 Token Endpoint 和认证配置。
+
+#### mcp-proxy.mjs (stdio 桥接)
+```bash
+COGNITO_TOKEN_ENDPOINT=https://xxx.auth.region.amazoncognito.com/oauth2/token \
+COGNITO_CLIENT_ID=xxx \
+COGNITO_CLIENT_SECRET=xxx \
+MCP_SERVER_URL=https://your-server.com/mcp \
+node mcp-proxy.mjs
+```
+
+### 设置 Cognito 认证
+
+```bash
+# 1. 创建 Cognito 资源
+./infrastructure/setup_cognito.sh us-east-1
+
+# 2. 配置 IAM 权限
+./infrastructure/setup_iam.sh
+
+# 3. 测试认证
+./infrastructure/test_mcp_auth.sh https://your-server.com/mcp <client_id> <client_secret>
+```
+
+### 管理凭证
+
+- **API Key**: 前端 Settings → API Keys → Generate / Revoke
+- **Cognito 客户端**: 前端 Settings → Cognito Credentials → Request / Revoke
+- **用户账号**: 邀请制，管理员通过 AWS CLI 创建用户
+
+---
+
 ## 🔧 配置说明
 
 ### 环境变量
@@ -369,6 +453,18 @@ DYNAMODB_TABLE_PREFIX=mcp-       # 表名前缀
 CODE_INTERPRETER_ENABLED=false   # 启用代码解释器
 CODE_INTERPRETER_ID=             # Bedrock Code Interpreter ID
 CODE_INTERPRETER_S3_BUCKET=      # 代码执行 S3 存储桶
+
+# 认证配置
+COGNITO_ENABLED=false            # 启用 Cognito JWT 认证
+COGNITO_USER_POOL_ID=            # Cognito User Pool ID
+COGNITO_REGION=us-east-1         # Cognito 区域
+COGNITO_ALLOWED_CLIENT_IDS=      # 允许的客户端 ID (逗号分隔,留空=全部允许)
+COGNITO_TOKEN_ENDPOINT=          # Token 端点
+COGNITO_SCOPES=                  # 允许的 scopes
+
+MCP_AUTH_ENABLED=false           # 启用 API Key 认证
+MCP_API_KEYS=                    # 静态 API Key (逗号分隔,推荐用 DynamoDB)
+MCP_SERVER_URL=                  # 服务器 URL (用于 OAuth 发现)
 
 # AWS 配置
 AWS_REGION=us-east-1             # AWS 区域
@@ -563,24 +659,32 @@ execution:
 
 ```
 open-mcp-skills/
-├── backend/                 # 后端服务
+├── backend/                     # 后端服务
 │   ├── app/
-│   │   ├── api/            # API 路由
-│   │   ├── core/           # 核心配置
-│   │   ├── models/         # 数据模型
-│   │   └── services/       # 业务逻辑
-│   ├── skills/             # 技能库
-│   ├── tests/              # 测试
+│   │   ├── api/                # API 路由 (mcp, admin, health)
+│   │   ├── core/               # 核心配置
+│   │   ├── models/             # 数据模型
+│   │   └── services/           # 业务逻辑
+│   │       ├── cognito_auth.py # Cognito JWT 认证
+│   │       ├── api_key_store.py# DynamoDB API Key 存储
+│   │       ├── mcp_engine.py   # MCP 协议引擎
+│   │       └── ...
+│   ├── skills/                 # 内置技能库
+│   ├── tests/                  # 测试
 │   └── Dockerfile
-├── frontend/               # 前端管理界面
+├── frontend/                    # 前端管理界面
 │   ├── src/
-│   │   ├── components/     # React 组件
-│   │   ├── pages/          # 页面
-│   │   └── lib/            # 工具函数
+│   │   ├── components/         # React 组件
+│   │   ├── pages/              # 页面 (settings, login, skills...)
+│   │   └── lib/                # API 客户端, Amplify Auth
 │   └── Dockerfile
-├── docs/                   # 文档
-├── scripts/                # 部署脚本
-├── docker-compose.yml      # 本地开发
+├── infrastructure/              # 基础设施脚本
+│   ├── setup_cognito.sh        # Cognito 一键部署
+│   ├── setup_iam.sh            # IAM 权限配置
+│   └── test_mcp_auth.sh        # 认证测试
+├── mcp-proxy.mjs               # stdio→HTTP MCP 代理
+├── deploy-backend.sh            # 后端部署脚本
+├── docker-compose.yml           # 本地开发
 └── README.md
 ```
 
@@ -615,9 +719,9 @@ open-mcp-skills/
 
 ## 📞 联系方式
 
-- 项目主页: [GitHub](https://github.com/yourusername/open-mcp-skills)
-- 问题反馈: [Issues](https://github.com/yourusername/open-mcp-skills/issues)
-- 讨论区: [Discussions](https://github.com/yourusername/open-mcp-skills/discussions)
+- 项目主页: [GitHub](https://github.com/comdaze/openmcpskills)
+- 问题反馈: [Issues](https://github.com/comdaze/openmcpskills/issues)
+- 讨论区: [Discussions](https://github.com/comdaze/openmcpskills/discussions)
 
 ---
 
