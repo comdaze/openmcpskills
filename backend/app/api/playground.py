@@ -61,17 +61,20 @@ class ChatResponse(BaseModel):
 async def get_mcp_tools(mcp_url: str) -> List[Dict[str, Any]]:
     """Fetch available tools from MCP server with caching."""
     import time
-    
+
     # Check cache
     now = time.time()
     if mcp_url in _tools_cache:
         if now - _cache_timestamp.get(mcp_url, 0) < CACHE_TTL:
             return _tools_cache[mcp_url]
-    
+
     try:
+        # Use localhost to bypass auth when calling ourselves
+        settings = get_settings()
+        local_url = "http://127.0.0.1:8000/mcp"
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                mcp_url,
+                local_url,
                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
                 timeout=10.0
             )
@@ -100,9 +103,10 @@ async def get_mcp_tools(mcp_url: str) -> List[Dict[str, Any]]:
 async def call_mcp_tool(mcp_url: str, tool_name: str, tool_input: Dict[str, Any]) -> str:
     """Call an MCP tool and return the result."""
     try:
+        local_url = "http://127.0.0.1:8000/mcp"
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                mcp_url,
+                local_url,
                 json={
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -181,9 +185,10 @@ async def execute_code_in_sandbox(mcp_url: str, skill_name: str, code: str, lang
         # Normalize Unicode issues (smart quotes, surrogate pairs) in LLM-generated code
         code = _normalize_code_for_execution(code)
         logger.info(f"Executing code for skill: {skill_name}, code length: {len(code)}")
+        local_url = "http://127.0.0.1:8000/mcp"
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                mcp_url,
+                local_url,
                 json={
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -265,31 +270,47 @@ async def chat(request: ChatRequest):
                 if isinstance(msg.content, str):
                     messages.append({"role": msg.role, "content": msg.content})
                 elif isinstance(msg.content, list):
-                    # Convert content blocks to Bedrock format
-                    bedrock_content = []
+                    # Check if it's a simple text-only message
+                    text_parts = []
+                    has_non_text = False
                     for block in msg.content:
-                        if isinstance(block, dict):
-                            if block.get("type") == "text":
-                                bedrock_content.append({"text": block.get("text", "")})
-                            elif block.get("type") == "tool_use":
-                                bedrock_content.append({
-                                    "toolUse": {
-                                        "toolUseId": block.get("id", ""),
-                                        "name": block.get("name", ""),
-                                        "input": block.get("input", {}),
-                                    }
-                                })
-                            elif block.get("type") == "tool_result":
-                                bedrock_content.append({
-                                    "toolResult": {
-                                        "toolUseId": block.get("tool_use_id", ""),
-                                        "content": [{"text": block.get("content", "")}],
-                                    }
-                                })
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
                         elif isinstance(block, str):
-                            bedrock_content.append({"text": block})
-                    if bedrock_content:
-                        messages.append({"role": msg.role, "content": bedrock_content})
+                            text_parts.append(block)
+                        else:
+                            has_non_text = True
+                            break
+
+                    if not has_non_text and text_parts:
+                        # Simple text message — send as string (Bedrock prefers this)
+                        messages.append({"role": msg.role, "content": "\n".join(text_parts)})
+                    else:
+                        # Complex message with tool_use/tool_result blocks
+                        bedrock_content = []
+                        for block in msg.content:
+                            if isinstance(block, dict):
+                                if block.get("type") == "text":
+                                    bedrock_content.append({"text": block.get("text", "")})
+                                elif block.get("type") == "tool_use":
+                                    bedrock_content.append({
+                                        "toolUse": {
+                                            "toolUseId": block.get("id", ""),
+                                            "name": block.get("name", ""),
+                                            "input": block.get("input", {}),
+                                        }
+                                    })
+                                elif block.get("type") == "tool_result":
+                                    bedrock_content.append({
+                                        "toolResult": {
+                                            "toolUseId": block.get("tool_use_id", ""),
+                                            "content": [{"text": str(block.get("content", ""))}],
+                                        }
+                                    })
+                            elif isinstance(block, str):
+                                bedrock_content.append({"text": block})
+                        if bedrock_content:
+                            messages.append({"role": msg.role, "content": bedrock_content})
                 else:
                     messages.append({"role": msg.role, "content": str(msg.content)})
         else:
