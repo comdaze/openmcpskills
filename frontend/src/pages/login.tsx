@@ -27,7 +27,7 @@ export function LoginPage() {
 
       <div className="flex w-full items-center justify-center p-8 md:w-1/2">
         <Authenticator 
-          loginMechanisms={['email']}
+          signUpAttributes={['email']}
           components={{
             SignIn: {
               Header() {

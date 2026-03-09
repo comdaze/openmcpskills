@@ -1,42 +1,50 @@
 #!/bin/bash
 
-# Open MCP Skills - Cognito S2S Authentication Setup
-# Creates Cognito User Pool, Domain, Resource Server, and App Client
+# Open MCP Skills - Cognito Authentication Setup
+# Creates Cognito User Pool, Domain, Resource Server, and App Clients:
+#   - S2S (Service-to-Service) client for MCP API access (client_credentials flow)
+#   - Frontend client for user login (authorization_code + PKCE, no secret)
 
 set -e
 
 REGION="${1:-us-east-1}"
 PROJECT_NAME="openmcpskills"
+FRONTEND_URL="${2:-https://mcp.openmcpskills.click}"
 
 echo "================================================"
-echo "Setting up Cognito S2S Authentication"
+echo "Setting up Cognito Authentication"
 echo "Project: $PROJECT_NAME"
 echo "Region: $REGION"
+echo "Frontend URL: $FRONTEND_URL"
 echo "================================================"
 
 # 1. Create User Pool
 echo ""
-echo "[1/5] Creating User Pool..."
+echo "[1/6] Creating User Pool..."
 POOL_RESPONSE=$(aws cognito-idp create-user-pool \
   --pool-name "${PROJECT_NAME}-auth-pool" \
+  --auto-verified-attributes email \
+  --admin-create-user-config AllowAdminCreateUserOnly=false \
+  --policies '{"PasswordPolicy":{"MinimumLength":8,"RequireUppercase":true,"RequireLowercase":true,"RequireNumbers":true,"RequireSymbols":true}}' \
   --region $REGION)
 POOL_ID=$(echo $POOL_RESPONSE | jq -r '.UserPool.Id')
-echo "✓ User Pool ID: $POOL_ID"
+echo "  User Pool ID: $POOL_ID"
 
 # 2. Create Domain
 echo ""
-echo "[2/5] Creating Domain..."
-DOMAIN_PREFIX="${PROJECT_NAME}-$(date +%s)"
+echo "[2/6] Creating Domain..."
+DOMAIN_PREFIX="${PROJECT_NAME}-$(aws sts get-caller-identity --query Account --output text)"
 aws cognito-idp create-user-pool-domain \
   --domain $DOMAIN_PREFIX \
   --user-pool-id $POOL_ID \
   --region $REGION
 TOKEN_ENDPOINT="https://${DOMAIN_PREFIX}.auth.${REGION}.amazoncognito.com/oauth2/token"
-echo "✓ Token URL: $TOKEN_ENDPOINT"
+echo "  Domain: $DOMAIN_PREFIX"
+echo "  Token Endpoint: $TOKEN_ENDPOINT"
 
-# 3. Create Resource Server
+# 3. Create Resource Server (for S2S scopes)
 echo ""
-echo "[3/5] Creating Resource Server..."
+echo "[3/6] Creating Resource Server..."
 RESOURCE_SERVER_IDENTIFIER="${PROJECT_NAME}-api"
 aws cognito-idp create-resource-server \
   --user-pool-id $POOL_ID \
@@ -47,12 +55,12 @@ aws cognito-idp create-resource-server \
     ScopeName=admin,ScopeDescription="Admin access" \
     ScopeName=read,ScopeDescription="Read access" \
   --region $REGION
-echo "✓ Resource Server: $RESOURCE_SERVER_IDENTIFIER"
+echo "  Resource Server: $RESOURCE_SERVER_IDENTIFIER"
 
-# 4. Create App Client (Service-to-Service)
+# 4. Create S2S App Client (client_credentials flow, with secret)
 echo ""
-echo "[4/5] Creating App Client for Service-to-Service Auth..."
-CLIENT_RESPONSE=$(aws cognito-idp create-user-pool-client \
+echo "[4/6] Creating S2S App Client..."
+S2S_RESPONSE=$(aws cognito-idp create-user-pool-client \
   --user-pool-id $POOL_ID \
   --client-name "${PROJECT_NAME}-service-client" \
   --generate-secret \
@@ -62,150 +70,120 @@ CLIENT_RESPONSE=$(aws cognito-idp create-user-pool-client \
     "${RESOURCE_SERVER_IDENTIFIER}/read" \
   --allowed-o-auth-flows-user-pool-client \
   --region $REGION)
-CLIENT_ID=$(echo $CLIENT_RESPONSE | jq -r '.UserPoolClient.ClientId')
-CLIENT_SECRET=$(echo $CLIENT_RESPONSE | jq -r '.UserPoolClient.ClientSecret')
-echo "✓ Client ID: $CLIENT_ID"
-echo "✓ Client Secret: $CLIENT_SECRET"
+S2S_CLIENT_ID=$(echo $S2S_RESPONSE | jq -r '.UserPoolClient.ClientId')
+S2S_CLIENT_SECRET=$(echo $S2S_RESPONSE | jq -r '.UserPoolClient.ClientSecret')
+echo "  Client ID: $S2S_CLIENT_ID"
+echo "  Client Secret: $S2S_CLIENT_SECRET"
 
-# 5. Test obtaining token
+# 5. Create Frontend App Client (authorization_code + PKCE, no secret)
 echo ""
-echo "[5/5] Testing token retrieval..."
+echo "[5/6] Creating Frontend App Client..."
+FRONTEND_RESPONSE=$(aws cognito-idp create-user-pool-client \
+  --user-pool-id $POOL_ID \
+  --client-name "${PROJECT_NAME}-frontend" \
+  --no-generate-secret \
+  --explicit-auth-flows ALLOW_REFRESH_TOKEN_AUTH ALLOW_USER_SRP_AUTH \
+  --supported-identity-providers COGNITO \
+  --callback-urls "[\"${FRONTEND_URL}/\",\"http://localhost:5173/\"]" \
+  --logout-urls "[\"${FRONTEND_URL}/login\",\"http://localhost:5173/login\"]" \
+  --allowed-o-auth-flows code \
+  --allowed-o-auth-scopes openid email profile \
+  --allowed-o-auth-flows-user-pool-client \
+  --region $REGION)
+FRONTEND_CLIENT_ID=$(echo $FRONTEND_RESPONSE | jq -r '.UserPoolClient.ClientId')
+echo "  Client ID: $FRONTEND_CLIENT_ID"
+
+# 6. Test S2S token retrieval
+echo ""
+echo "[6/6] Testing S2S token retrieval..."
 TOKEN_RESPONSE=$(curl -s -X POST "$TOKEN_ENDPOINT" \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -u "${CLIENT_ID}:${CLIENT_SECRET}" \
+  -u "${S2S_CLIENT_ID}:${S2S_CLIENT_SECRET}" \
   -d "grant_type=client_credentials&scope=${RESOURCE_SERVER_IDENTIFIER}/mcp ${RESOURCE_SERVER_IDENTIFIER}/read")
 ACCESS_TOKEN=$(echo $TOKEN_RESPONSE | jq -r '.access_token')
 
-if [ "$ACCESS_TOKEN" != "null" ] && [ ! -z "$ACCESS_TOKEN" ]; then
-  echo "✓ Token obtained successfully!"
-  echo "Access Token (first 50 chars): ${ACCESS_TOKEN:0:50}..."
+if [ "$ACCESS_TOKEN" != "null" ] && [ -n "$ACCESS_TOKEN" ]; then
+  echo "  S2S token obtained successfully!"
 else
-  echo "✗ Failed to obtain token"
+  echo "  WARNING: Failed to obtain S2S token"
   echo $TOKEN_RESPONSE | jq
 fi
 
-# Generate Discovery URL
-DISCOVERY_URL="https://cognito-idp.${REGION}.amazonaws.com/${POOL_ID}/.well-known/openid-configuration"
-
-# Write configuration to file
-CONFIG_FILE="infrastructure/cognito-config.txt"
-mkdir -p infrastructure
-
-cat > $CONFIG_FILE << EOFCONFIG
-================================================
-Open MCP Skills S2S Authentication Configuration
-================================================
-User Pool ID: $POOL_ID
-Region: $REGION
-Domain Prefix: $DOMAIN_PREFIX
-Token Endpoint: $TOKEN_ENDPOINT
-Discovery URL: $DISCOVERY_URL
-Resource Server: $RESOURCE_SERVER_IDENTIFIER
-
-App Client (Service-to-Service):
-  Client ID: $CLIENT_ID
-  Client Secret: $CLIENT_SECRET
-
-Scopes:
-  - ${RESOURCE_SERVER_IDENTIFIER}/mcp
-  - ${RESOURCE_SERVER_IDENTIFIER}/read
-  - ${RESOURCE_SERVER_IDENTIFIER}/admin
-
-Environment Variables for Open MCP Skills:
-  COGNITO_ENABLED=true
-  COGNITO_USER_POOL_ID=$POOL_ID
-  COGNITO_REGION=$REGION
-  COGNITO_ALLOWED_CLIENT_IDS=$CLIENT_ID
-  COGNITO_TOKEN_ENDPOINT=$TOKEN_ENDPOINT
-  COGNITO_DISCOVERY_URL=$DISCOVERY_URL
-  COGNITO_RESOURCE_SERVER=$RESOURCE_SERVER_IDENTIFIER
-
-Quick Suite MCP Integration Configuration:
-  MCP Server URL: https://your-domain/mcp
-  Authentication Type: OAuth 2.0 / Service Account
-  Token URL: $TOKEN_ENDPOINT
-  Client ID: $CLIENT_ID
-  Client Secret: $CLIENT_SECRET
-  Scopes: ${RESOURCE_SERVER_IDENTIFIER}/mcp ${RESOURCE_SERVER_IDENTIFIER}/read
-================================================
-EOFCONFIG
-
-# Also write a .env snippet for easy copy
+# Write cognito.env
 cat > infrastructure/cognito.env << EOFENV
-# Cognito S2S Authentication
-COGNITO_ENABLED=true
+# Cognito Authentication Configuration
+# Generated by setup_cognito.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# User Pool
 COGNITO_USER_POOL_ID=$POOL_ID
 COGNITO_REGION=$REGION
-COGNITO_ALLOWED_CLIENT_IDS=$CLIENT_ID
+DOMAIN_PREFIX=$DOMAIN_PREFIX
+
+# S2S (Service-to-Service) Authentication
+COGNITO_ENABLED=true
 COGNITO_TOKEN_ENDPOINT=$TOKEN_ENDPOINT
-COGNITO_DISCOVERY_URL=$DISCOVERY_URL
+COGNITO_ALLOWED_CLIENT_IDS=
 COGNITO_RESOURCE_SERVER=$RESOURCE_SERVER_IDENTIFIER
 COGNITO_SCOPES=${RESOURCE_SERVER_IDENTIFIER}/mcp,${RESOURCE_SERVER_IDENTIFIER}/read
 
-# For testing - Client credentials
-COGNITO_CLIENT_ID=$CLIENT_ID
-COGNITO_CLIENT_SECRET=$CLIENT_SECRET
+# S2S Test Credentials (first client — store securely)
+COGNITO_CLIENT_ID=$S2S_CLIENT_ID
+COGNITO_CLIENT_SECRET=$S2S_CLIENT_SECRET
+
+# Frontend App Client (public, no secret)
+COGNITO_FRONTEND_CLIENT_ID=$FRONTEND_CLIENT_ID
 EOFENV
 
-echo ""
-echo "✓ Configuration saved to:"
-echo "  - $CONFIG_FILE (full config)"
-echo "  - infrastructure/cognito.env (.env snippet)"
-
-# Create cleanup script
-cat > infrastructure/cleanup-cognito.sh << 'EOFCLEANUP'
-#!/bin/bash
-# Load config
-source infrastructure/cognito.env
-
-echo "Cleaning up Cognito resources..."
-aws cognito-idp delete-user-pool-domain --domain $DOMAIN_PREFIX --user-pool-id $COGNITO_USER_POOL_ID --region $COGNITO_REGION 2>/dev/null || true
-sleep 2
-aws cognito-idp delete-user-pool --user-pool-id $COGNITO_USER_POOL_ID --region $COGNITO_REGION 2>/dev/null || true
-echo "✓ Resources deleted"
-EOFCLEANUP
-chmod +x infrastructure/cleanup-cognito.sh
-
-# Add DOMAIN_PREFIX to cognito.env for cleanup script
-echo "DOMAIN_PREFIX=$DOMAIN_PREFIX" >> infrastructure/cognito.env
-
-# Create token test script
-cat > infrastructure/test-token.sh << 'EOFTEST'
-#!/bin/bash
-source infrastructure/cognito.env
-
-echo "Retrieving access token..."
-TOKEN_RESPONSE=$(curl -s -X POST "$COGNITO_TOKEN_ENDPOINT" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -u "${COGNITO_CLIENT_ID}:${COGNITO_CLIENT_SECRET}" \
-  -d "grant_type=client_credentials&scope=${COGNITO_SCOPES//,/ }")
-
-ACCESS_TOKEN=$(echo $TOKEN_RESPONSE | jq -r '.access_token')
-
-if [ "$ACCESS_TOKEN" != "null" ] && [ -n "$ACCESS_TOKEN" ]; then
-  echo "✓ Token obtained successfully!"
-  echo ""
-  echo "Access Token:"
-  echo $ACCESS_TOKEN
-  echo ""
-  echo "Token payload:"
-  echo $ACCESS_TOKEN | cut -d'.' -f2 | base64 -d 2>/dev/null | jq . 2>/dev/null || echo "(unable to decode)"
-else
-  echo "✗ Failed to obtain token"
-  echo $TOKEN_RESPONSE | jq
-fi
-EOFTEST
-chmod +x infrastructure/test-token.sh
+# Write amplify_outputs.json for frontend
+cat > frontend/amplify_outputs.json << EOFJSON
+{
+  "version": "1.3",
+  "auth": {
+    "user_pool_id": "$POOL_ID",
+    "user_pool_client_id": "$FRONTEND_CLIENT_ID",
+    "aws_region": "$REGION",
+    "password_policy": {
+      "min_length": 8,
+      "require_lowercase": true,
+      "require_uppercase": true,
+      "require_numbers": true,
+      "require_symbols": true
+    },
+    "standard_required_attributes": [
+      "email"
+    ],
+    "username_attributes": [
+      "email"
+    ],
+    "user_verification_types": [
+      "email"
+    ],
+    "unauthenticated_identities_enabled": false
+  }
+}
+EOFJSON
 
 echo ""
 echo "================================================"
 echo "Setup complete!"
 echo "================================================"
 echo ""
-echo "Next steps:"
-echo "  1. Add the environment variables from infrastructure/cognito.env to your .env file"
-echo "  2. Start the MCP server with Cognito authentication enabled"
-echo "  3. Test with: ./infrastructure/test-token.sh"
+echo "Files written:"
+echo "  - infrastructure/cognito.env (backend config + S2S credentials)"
+echo "  - frontend/amplify_outputs.json (frontend Amplify config)"
 echo ""
-echo "To cleanup: ./infrastructure/cleanup-cognito.sh"
+echo "Next steps:"
+echo "  1. Copy Cognito settings to .env.deploy:"
+echo "     COGNITO_ENABLED=true"
+echo "     COGNITO_USER_POOL_ID=$POOL_ID"
+echo "     COGNITO_REGION=$REGION"
+echo "     COGNITO_ALLOWED_CLIENT_IDS="
+echo "     COGNITO_TOKEN_ENDPOINT=$TOKEN_ENDPOINT"
+echo "     COGNITO_SCOPES=${RESOURCE_SERVER_IDENTIFIER}/mcp,${RESOURCE_SERVER_IDENTIFIER}/read"
+echo ""
+echo "  2. Deploy backend and frontend"
+echo ""
+echo "  3. Test S2S auth: ./infrastructure/test_mcp_auth.sh"
+echo ""
+echo "  4. Additional S2S clients can be created from the frontend Settings page"
 echo ""

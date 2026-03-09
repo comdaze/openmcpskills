@@ -68,12 +68,18 @@ class CognitoAuthService:
                     return self._jwks
                 raise
     
-    async def verify_token(self, token: str, required_scopes: list[str] | None = None) -> dict:
+    async def verify_token(
+        self,
+        token: str,
+        required_scopes: list[str] | None = None,
+        allow_id_token: bool = False,
+    ) -> dict:
         """Verify a JWT token from Cognito.
 
         Args:
-            token: The JWT access token to verify
+            token: The JWT access token (or ID token) to verify
             required_scopes: If provided, all listed scopes must be present in the token
+            allow_id_token: If True, also accept Cognito ID tokens (for frontend user auth)
 
         Returns:
             The decoded token payload if valid
@@ -126,17 +132,21 @@ class CognitoAuthService:
                 }
             )
             
-            # Verify token_use is 'access' for S2S
+            # Verify token_use
             token_use = payload.get("token_use")
-            if token_use != "access":
+            if token_use == "id" and allow_id_token:
+                # ID token from frontend user login — no scope check needed
+                logger.debug(f"ID token verified for user: {payload.get('email') or payload.get('sub')}")
+                return payload
+            elif token_use != "access":
                 raise ValueError(f"Invalid token_use: {token_use}, expected 'access'")
-            
-            # Verify client_id if specified
+
+            # Verify client_id if specified (access tokens only)
             client_id = payload.get("client_id")
             if self.allowed_client_ids and client_id not in self.allowed_client_ids:
                 raise ValueError(f"Client ID {client_id} not in allowed list")
 
-            # Verify required scopes
+            # Verify required scopes (access tokens only)
             if required_scopes:
                 token_scopes = set(payload.get("scope", "").split())
                 missing = set(required_scopes) - token_scopes

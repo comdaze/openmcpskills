@@ -113,6 +113,7 @@ async def _verify_auth_internal(
     api_key_from_header: str | None,
     api_key_from_query: str | None,
     required_scopes: list[str] | None = None,
+    allow_id_token: bool = False,
 ) -> dict | str | None:
     """Shared auth verification logic used by both MCP and Admin auth deps."""
     settings = get_settings()
@@ -132,7 +133,9 @@ async def _verify_auth_internal(
                     )
 
                 payload = await cognito_service.verify_token(
-                    bearer_token.credentials, required_scopes=required_scopes
+                    bearer_token.credentials,
+                    required_scopes=required_scopes,
+                    allow_id_token=allow_id_token,
                 )
                 logger.debug(f"Cognito auth successful for client: {payload.get('client_id')}")
                 return payload
@@ -248,6 +251,7 @@ async def verify_admin_auth(
     return await _verify_auth_internal(
         bearer_token, api_key_from_header, api_key_from_query,
         required_scopes=["openmcpskills-api/admin"],
+        allow_id_token=True,  # Accept frontend user ID tokens
     )
 
 
