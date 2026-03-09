@@ -33,17 +33,24 @@ MODEL_MAX_TOKENS = {
 
 class Message(BaseModel):
     role: str
-    content: str
+    content: Any  # str or list of content blocks
 
 
 class ChatRequest(BaseModel):
-    message: str
+    # Legacy format
+    message: Optional[str] = None
     history: List[Message] = []
+    # New format (from playground-runtime.ts)
+    messages: Optional[List[Message]] = None
     model: str = "claude-opus-4-5"
-    useMcpServer: bool = True
+    useMcpServer: Optional[bool] = None
+    use_mcp_server: Optional[bool] = None
     mcpServerUrl: Optional[str] = None
+    mcp_server_url: Optional[str] = None
     bedrockEndpoint: Optional[str] = None
+    bedrock_endpoint: Optional[str] = None
     bedrockApiKey: Optional[str] = None
+    bedrock_api_key: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -236,22 +243,61 @@ async def chat(request: ChatRequest):
         if not model_id:
             raise HTTPException(status_code=400, detail=f"Invalid model: {request.model}")
 
-        # Use frontend config or fall back to env config
-        mcp_url = request.mcpServerUrl or settings.mcp_server_url
-        bedrock_endpoint = request.bedrockEndpoint or settings.bedrock_endpoint
-        
+        # Normalize field names (support both camelCase and snake_case)
+        use_mcp = request.useMcpServer if request.useMcpServer is not None else request.use_mcp_server
+        if use_mcp is None:
+            use_mcp = True
+        mcp_url = request.mcpServerUrl or request.mcp_server_url or settings.mcp_server_url
+        bedrock_endpoint = request.bedrockEndpoint or request.bedrock_endpoint or settings.bedrock_endpoint
+
         # Initialize Bedrock client
         client_kwargs = {"region_name": settings.aws_region}
         if bedrock_endpoint:
             client_kwargs["endpoint_url"] = bedrock_endpoint
-            
+
         bedrock = boto3.client("bedrock-runtime", **client_kwargs)
 
-        # Build messages
+        # Build messages - support both old and new format
         messages = []
-        for msg in request.history:
-            messages.append({"role": msg.role, "content": msg.content})
-        messages.append({"role": "user", "content": request.message})
+        if request.messages:
+            # New format: messages array with content blocks
+            for msg in request.messages:
+                if isinstance(msg.content, str):
+                    messages.append({"role": msg.role, "content": msg.content})
+                elif isinstance(msg.content, list):
+                    # Convert content blocks to Bedrock format
+                    bedrock_content = []
+                    for block in msg.content:
+                        if isinstance(block, dict):
+                            if block.get("type") == "text":
+                                bedrock_content.append({"text": block.get("text", "")})
+                            elif block.get("type") == "tool_use":
+                                bedrock_content.append({
+                                    "toolUse": {
+                                        "toolUseId": block.get("id", ""),
+                                        "name": block.get("name", ""),
+                                        "input": block.get("input", {}),
+                                    }
+                                })
+                            elif block.get("type") == "tool_result":
+                                bedrock_content.append({
+                                    "toolResult": {
+                                        "toolUseId": block.get("tool_use_id", ""),
+                                        "content": [{"text": block.get("content", "")}],
+                                    }
+                                })
+                        elif isinstance(block, str):
+                            bedrock_content.append({"text": block})
+                    if bedrock_content:
+                        messages.append({"role": msg.role, "content": bedrock_content})
+                else:
+                    messages.append({"role": msg.role, "content": str(msg.content)})
+        else:
+            # Legacy format: history + message
+            for msg in request.history:
+                messages.append({"role": msg.role, "content": msg.content if isinstance(msg.content, str) else str(msg.content)})
+            if request.message:
+                messages.append({"role": "user", "content": request.message})
 
         # Prepare request body
         system_prompt = (
@@ -271,7 +317,7 @@ async def chat(request: ChatRequest):
 
         # Add MCP tools if enabled
         tools = []
-        if request.useMcpServer and mcp_url:
+        if use_mcp and mcp_url:
             tools = await get_mcp_tools(mcp_url)
             if tools:
                 body["tools"] = tools
