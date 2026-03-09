@@ -5,7 +5,6 @@ Provides endpoints for the admin dashboard to manage Claude Skills.
 
 import io
 import logging
-import secrets
 import zipfile
 from pathlib import Path
 from typing import Annotated, Any
@@ -14,7 +13,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.api.deps import get_skill_loader, get_s3_store, get_s3_store_optional
+from app.api.deps import AdminAuthDep, get_skill_loader, get_s3_store, get_s3_store_optional
 from app.core.config import get_settings
 from app.models.skill import Skill, SkillManifest, SkillMetadata, SkillStatus
 from app.services.skill_loader import SkillLoader
@@ -212,6 +211,7 @@ async def reload_skill(
     skill_id: str,
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
     s3_store: Annotated[S3SkillStore, Depends(get_s3_store)],
+    _auth: AdminAuthDep = None,
 ) -> SkillResponse:
     """Reload a skill (hot reload).
     
@@ -228,6 +228,7 @@ async def reload_skill(
 async def delete_skill(
     skill_id: str,
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    _auth: AdminAuthDep = None,
 ) -> dict[str, str]:
     """Unload a skill and remove its files from disk."""
     import shutil
@@ -249,6 +250,7 @@ async def delete_skill(
 @router.post("/skills/reload-all")
 async def reload_all_skills(
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    _auth: AdminAuthDep = None,
 ) -> dict[str, Any]:
     """Reload all skills from the skills directory."""
     count = await skill_loader.load_from_directory()
@@ -261,6 +263,7 @@ async def reload_all_skills(
 @router.post("/skills/validate", response_model=ValidationResponse)
 async def validate_skill_package(
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    _auth: AdminAuthDep = None,
     file: UploadFile = File(...),
 ) -> ValidationResponse:
     """Validate an uploaded skill package.
@@ -306,6 +309,7 @@ async def validate_skill_package(
 @router.post("/skills/upload")
 async def upload_skill_package(
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    _auth: AdminAuthDep = None,
     file: UploadFile = File(...),
 ) -> SkillResponse:
     """Upload and install a Claude Skill package.
@@ -420,6 +424,7 @@ async def rollback_skill(
     skill_id: str,
     body: RollbackRequest,
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    _auth: AdminAuthDep = None,
 ) -> dict[str, str]:
     """Rollback a skill to a specific version (S3 mode only)."""
     settings = get_settings()
@@ -483,6 +488,7 @@ class GitHubImportRequest(BaseModel):
 async def import_from_github(
     req: GitHubImportRequest,
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    _auth: AdminAuthDep = None,
 ) -> dict[str, Any]:
     """Import skills from a GitHub repository URL.
     
@@ -602,6 +608,7 @@ class GenerateSkillRequest(BaseModel):
 async def generate_skill(
     req: GenerateSkillRequest,
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    _auth: AdminAuthDep = None,
 ) -> SkillResponse:
     """Generate a skill from a documentation site, GitHub repo, or PDF.
 
@@ -928,11 +935,19 @@ async def short_link_redirect(short_id: str):
     )
 
 
-# ---- API Key Management ----
+# ---- API Key Management (DynamoDB-backed) ----
+
+class GenerateApiKeyRequest(BaseModel):
+    """Request to generate an API key."""
+    name: str = "default"
+
 
 class GenerateApiKeyResponse(BaseModel):
     """Response from API key generation."""
     api_key: str
+    api_key_id: str
+    key_prefix: str
+    name: str
     message: str
 
 
@@ -943,78 +958,97 @@ class ApiKeyStatusResponse(BaseModel):
     message: str
 
 
+class ApiKeyInfo(BaseModel):
+    """Public info about an API key (no secrets)."""
+    api_key_id: str
+    key_prefix: str
+    name: str
+    created_at: str
+    last_used_at: str
+    status: str
+
+
+class RevokeApiKeyRequest(BaseModel):
+    """Request to revoke an API key."""
+    api_key_id: str
+
+
 @router.post("/api-keys/generate", response_model=GenerateApiKeyResponse)
-async def generate_api_key() -> GenerateApiKeyResponse:
-    """Generate a new MCP API key.
-    
-    The key is automatically added to the server configuration.
-    Note: In production, keys should be stored securely (e.g., AWS Secrets Manager).
+async def generate_api_key(
+    req: GenerateApiKeyRequest | None = None,
+    _auth: AdminAuthDep = None,
+) -> GenerateApiKeyResponse:
+    """Generate a new MCP API key (persisted in DynamoDB).
+
+    The raw key is returned only once and cannot be retrieved later.
     """
-    settings = get_settings()
-    
-    # Generate a secure random key
-    new_key = f"sk-mcp-{secrets.token_hex(16)}"
-    
-    # Add to existing keys
-    current_keys = list(settings.mcp_api_keys) if settings.mcp_api_keys else []
-    current_keys.append(new_key)
-    
-    # Update settings (in-memory only - for persistent storage, use env vars or secrets manager)
-    settings.mcp_api_keys = current_keys
-    
-    # Also enable auth if not already enabled
-    if not settings.mcp_auth_enabled:
-        settings.mcp_auth_enabled = True
-        logger.info("MCP API key authentication has been enabled")
-    
-    logger.info("Generated new API key (total keys: %d)", len(current_keys))
-    
+    from app.services.api_key_store import get_api_key_store
+
+    store = get_api_key_store()
+    if store is None:
+        raise HTTPException(status_code=500, detail="API key store not initialized")
+
+    name = req.name if req else "default"
+    result = await store.generate_key(name)
+
     return GenerateApiKeyResponse(
-        api_key=new_key,
-        message=f"API key generated successfully. Total keys: {len(current_keys)}. "
-                "Note: This key is stored in memory only. For persistence, add it to MCP_API_KEYS environment variable."
+        api_key=result["raw_key"],
+        api_key_id=result["api_key_id"],
+        key_prefix=result["key_prefix"],
+        name=name,
+        message="API key generated successfully. Store it securely — it cannot be retrieved again.",
     )
+
+
+@router.get("/api-keys", response_model=list[ApiKeyInfo])
+async def list_api_keys(_auth: AdminAuthDep = None) -> list[ApiKeyInfo]:
+    """List all API keys (prefix only, no secrets)."""
+    from app.services.api_key_store import get_api_key_store
+
+    store = get_api_key_store()
+    if store is None:
+        return []
+
+    keys = await store.list_keys()
+    return [ApiKeyInfo(**k) for k in keys]
 
 
 @router.get("/api-keys/status", response_model=ApiKeyStatusResponse)
 async def get_api_key_status() -> ApiKeyStatusResponse:
     """Get the current API key authentication status."""
     settings = get_settings()
-    
+
+    from app.services.api_key_store import get_api_key_store
+
+    store = get_api_key_store()
+    env_count = len(settings.mcp_api_keys_list)
+    dynamo_count = store.active_count if store else 0
+    total = env_count + dynamo_count
+
     return ApiKeyStatusResponse(
         auth_enabled=settings.mcp_auth_enabled,
-        keys_configured=len(settings.mcp_api_keys) if settings.mcp_api_keys else 0,
-        message="API key authentication is " + ("enabled" if settings.mcp_auth_enabled else "disabled")
+        keys_configured=total,
+        message="API key authentication is " + ("enabled" if settings.mcp_auth_enabled else "disabled"),
     )
 
 
-class RevokeApiKeyRequest(BaseModel):
-    """Request to revoke an API key."""
-    api_key: str
-
-
 @router.post("/api-keys/revoke")
-async def revoke_api_key(req: RevokeApiKeyRequest) -> dict[str, str]:
-    """Revoke an existing API key.
-    
-    Note: This only removes the key from memory. Update MCP_API_KEYS env var to persist the change.
-    """
-    settings = get_settings()
-    
-    current_keys = list(settings.mcp_api_keys) if settings.mcp_api_keys else []
-    
-    if req.api_key not in current_keys:
+async def revoke_api_key(
+    req: RevokeApiKeyRequest,
+    _auth: AdminAuthDep = None,
+) -> dict[str, str]:
+    """Revoke an API key by ID (persisted in DynamoDB)."""
+    from app.services.api_key_store import get_api_key_store
+
+    store = get_api_key_store()
+    if store is None:
+        raise HTTPException(status_code=500, detail="API key store not initialized")
+
+    success = await store.revoke_key(req.api_key_id)
+    if not success:
         raise HTTPException(status_code=404, detail="API key not found")
-    
-    current_keys.remove(req.api_key)
-    settings.mcp_api_keys = current_keys
-    
-    logger.info("Revoked API key (remaining keys: %d)", len(current_keys))
-    
-    return {
-        "message": f"API key revoked successfully. Remaining keys: {len(current_keys)}",
-        "remaining_keys": str(len(current_keys))
-    }
+
+    return {"message": f"API key {req.api_key_id} revoked successfully"}
 
 
 # ---- Authentication Configuration ----
@@ -1068,4 +1102,63 @@ async def get_auth_config() -> AuthConfigResponse:
         client_id=settings.cognito_client_id if settings.cognito_enabled else None,
         scopes=" ".join(settings.cognito_scopes_list) if settings.cognito_scopes_list else "openmcpskills-api/mcp openmcpskills-api/read",
         mcp_server_url=settings.mcp_server_url,
+    )
+
+
+# ---- Cognito Client Provisioning ----
+
+class CreateCognitoClientRequest(BaseModel):
+    """Request to create a Cognito app client."""
+    client_name: str
+
+
+class CreateCognitoClientResponse(BaseModel):
+    """Response with new Cognito client credentials (shown once)."""
+    client_id: str
+    client_secret: str
+    token_endpoint: str
+    scopes: list[str]
+    message: str
+
+
+@router.post("/cognito/create-client", response_model=CreateCognitoClientResponse)
+async def create_cognito_client(
+    req: CreateCognitoClientRequest,
+    _auth: AdminAuthDep = None,
+) -> CreateCognitoClientResponse:
+    """Create a new Cognito app client with client_credentials flow.
+
+    Returns the client_id and client_secret once — the secret cannot be
+    retrieved later.
+    """
+    settings = get_settings()
+
+    if not settings.cognito_enabled:
+        raise HTTPException(status_code=400, detail="Cognito authentication is not enabled")
+
+    from app.services.cognito_auth import get_cognito_service
+
+    cognito_service = get_cognito_service()
+    if cognito_service is None:
+        raise HTTPException(status_code=500, detail="Cognito service not initialized")
+
+    scopes = settings.cognito_scopes_list or [
+        "openmcpskills-api/mcp",
+        "openmcpskills-api/read",
+    ]
+
+    try:
+        result = await cognito_service.create_app_client(req.client_name, scopes)
+    except Exception as e:
+        logger.error("Failed to create Cognito client: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to create client: {e}")
+
+    token_endpoint = settings.cognito_token_endpoint or ""
+
+    return CreateCognitoClientResponse(
+        client_id=result["client_id"],
+        client_secret=result["client_secret"],
+        token_endpoint=token_endpoint,
+        scopes=scopes,
+        message="Client created successfully. Store the client_secret securely — it cannot be retrieved again.",
     )

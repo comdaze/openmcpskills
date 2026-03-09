@@ -5,11 +5,7 @@
       "url": "http://127.0.0.1:8000/mcp",
       "headers": {
         "X-API-Key": "sk-mcp-766865ba6fcb9e0550701aef6b4451e1"
-      },
-      "autoApprove": [
-        "pptx",
-        "execute-python-code"
-      ]
+      }
     }
   }
 }

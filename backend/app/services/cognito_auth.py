@@ -68,15 +68,16 @@ class CognitoAuthService:
                     return self._jwks
                 raise
     
-    async def verify_token(self, token: str) -> dict:
+    async def verify_token(self, token: str, required_scopes: list[str] | None = None) -> dict:
         """Verify a JWT token from Cognito.
-        
+
         Args:
             token: The JWT access token to verify
-            
+            required_scopes: If provided, all listed scopes must be present in the token
+
         Returns:
             The decoded token payload if valid
-            
+
         Raises:
             ValueError: If the token is invalid or verification fails
         """
@@ -134,7 +135,14 @@ class CognitoAuthService:
             client_id = payload.get("client_id")
             if self.allowed_client_ids and client_id not in self.allowed_client_ids:
                 raise ValueError(f"Client ID {client_id} not in allowed list")
-            
+
+            # Verify required scopes
+            if required_scopes:
+                token_scopes = set(payload.get("scope", "").split())
+                missing = set(required_scopes) - token_scopes
+                if missing:
+                    raise ValueError(f"Missing required scopes: {', '.join(sorted(missing))}")
+
             logger.debug(f"Token verified for client: {client_id}")
             return payload
             
@@ -143,6 +151,36 @@ class CognitoAuthService:
         except JWTError as e:
             raise ValueError(f"Token verification failed: {e}")
     
+    async def create_app_client(self, client_name: str, scopes: list[str]) -> dict:
+        """Create a new Cognito app client with client_credentials flow.
+
+        Args:
+            client_name: Human-readable name for the client
+            scopes: OAuth scopes to grant (e.g. ["openmcpskills-api/mcp"])
+
+        Returns:
+            Dict with client_id, client_secret, and metadata
+        """
+        import aioboto3
+
+        session = aioboto3.Session()
+        async with session.client("cognito-idp", region_name=self.region) as client:
+            resp = await client.create_user_pool_client(
+                UserPoolId=self.user_pool_id,
+                ClientName=client_name,
+                GenerateSecret=True,
+                AllowedOAuthFlows=["client_credentials"],
+                AllowedOAuthScopes=scopes,
+                AllowedOAuthFlowsUserPoolClient=True,
+            )
+            app_client = resp["UserPoolClient"]
+            return {
+                "client_id": app_client["ClientId"],
+                "client_secret": app_client.get("ClientSecret", ""),
+                "client_name": client_name,
+                "scopes": scopes,
+            }
+
     async def get_token_from_credentials(
         self,
         token_endpoint: str,

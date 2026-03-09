@@ -5,7 +5,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import admin_router, health_router, mcp_router, playground_router
@@ -48,6 +48,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     invocation_logger = None
     s3_store = None
     code_interpreter = None
+
+    # Initialize persistent API key store (always enabled, independent of storage_backend)
+    from app.services.api_key_store import ApiKeyStore, set_api_key_store
+
+    api_key_store = ApiKeyStore()
+    try:
+        key_count = await api_key_store.load_all()
+        set_api_key_store(api_key_store)
+        logger.info(f"API key store initialized ({key_count} active keys)")
+    except Exception as e:
+        logger.warning(f"API key store initialization failed (non-fatal): {e}")
+        set_api_key_store(api_key_store)
 
     if settings.storage_backend == "s3":
         from app.services.s3_store import S3SkillStore
@@ -233,6 +245,64 @@ def create_app() -> FastAPI:
     app.include_router(mcp_router)
     app.include_router(admin_router)
     app.include_router(playground_router)
+
+    # MCP Streamable HTTP OAuth endpoints
+    # Kiro and other MCP clients do OAuth discovery before connecting.
+    # We provide minimal endpoints so clients can complete the handshake.
+    base_url = "http://127.0.0.1:8000"
+
+    @app.get("/.well-known/oauth-authorization-server")
+    async def oauth_metadata():
+        return {
+            "issuer": base_url,
+            "authorization_endpoint": f"{base_url}/oauth/authorize",
+            "token_endpoint": f"{base_url}/oauth/token",
+            "registration_endpoint": f"{base_url}/oauth/register",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code"],
+            "code_challenge_methods_supported": ["S256"],
+        }
+
+    @app.post("/oauth/register")
+    async def oauth_register(request: Request):
+        """Dynamic client registration — accept any client and return an ID."""
+        import secrets as _secrets
+        body = await request.json()
+        client_id = _secrets.token_hex(16)
+        return {
+            "client_id": client_id,
+            "client_name": body.get("client_name", "mcp-client"),
+            "redirect_uris": body.get("redirect_uris", []),
+            "grant_types": body.get("grant_types", ["authorization_code"]),
+            "response_types": body.get("response_types", ["code"]),
+            "token_endpoint_auth_method": "none",
+        }
+
+    @app.get("/oauth/authorize")
+    async def oauth_authorize(
+        response_type: str = "",
+        client_id: str = "",
+        redirect_uri: str = "",
+        state: str = "",
+        code_challenge: str = "",
+        code_challenge_method: str = "",
+    ):
+        """Authorization endpoint — immediately redirect with a code."""
+        import secrets as _secrets
+        from starlette.responses import RedirectResponse
+        code = _secrets.token_hex(16)
+        sep = "&" if "?" in redirect_uri else "?"
+        return RedirectResponse(f"{redirect_uri}{sep}code={code}&state={state}")
+
+    @app.post("/oauth/token")
+    async def oauth_token(request: Request):
+        """Token endpoint — return a dummy bearer token."""
+        import secrets as _secrets
+        return {
+            "access_token": _secrets.token_hex(32),
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        }
 
     return app
 

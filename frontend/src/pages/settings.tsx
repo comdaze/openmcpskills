@@ -5,8 +5,16 @@ import { Separator } from '@/components/ui/separator'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { apiFetch } from '@/lib/api'
-import { Server, Database, Cloud, CheckCircle, XCircle, Brain, Save, Check, Shield, Copy, ExternalLink } from 'lucide-react'
+import { Server, Database, Cloud, CheckCircle, XCircle, Brain, Save, Check, Shield, Copy, ExternalLink, Key, Plus, Trash2, AlertTriangle } from 'lucide-react'
 
 interface ServerInfo {
   name: string
@@ -30,6 +38,15 @@ interface AuthConfig {
   mcp_server_url: string
 }
 
+interface ApiKeyInfo {
+  api_key_id: string
+  key_prefix: string
+  name: string
+  created_at: string
+  last_used_at: string
+  status: string
+}
+
 export function SettingsPage() {
   const [info, setInfo] = useState<ServerInfo | null>(null)
   const [health, setHealth] = useState<HealthStatus | null>(null)
@@ -40,27 +57,50 @@ export function SettingsPage() {
   const [mcpServerUrl, setMcpServerUrl] = useState(defaultMcpUrl)
   const [isSaving, setIsSaving] = useState(false)
   const [showSuccess, setShowSuccess] = useState(false)
-  
+
   // Copy state for different fields
   const [copiedField, setCopiedField] = useState<string | null>(null)
+
+  // API Keys state
+  const [apiKeys, setApiKeys] = useState<ApiKeyInfo[]>([])
+  const [showGenerateDialog, setShowGenerateDialog] = useState(false)
+  const [newKeyName, setNewKeyName] = useState('')
+  const [generatedKey, setGeneratedKey] = useState<string | null>(null)
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [revokeKeyId, setRevokeKeyId] = useState<string | null>(null)
+
+  // Cognito credentials state
+  const [showCognitoDialog, setShowCognitoDialog] = useState(false)
+  const [cognitoClientName, setCognitoClientName] = useState('')
+  const [cognitoCredentials, setCognitoCredentials] = useState<{
+    client_id: string
+    client_secret: string
+    token_endpoint: string
+    scopes: string[]
+  } | null>(null)
+  const [isCreatingClient, setIsCreatingClient] = useState(false)
+
+  const loadApiKeys = () => {
+    apiFetch<ApiKeyInfo[]>('/admin/api-keys').then(setApiKeys).catch(() => setApiKeys([]))
+  }
 
   useEffect(() => {
     apiFetch<ServerInfo>('/info').then(setInfo).catch(() => setInfo({ name: 'MCP Skills Server', version: 'unknown', storage_backend: 'unknown' }))
     apiFetch<HealthStatus>('/health').then(setHealth).catch(() => setHealth({ status: 'unknown', skills_loaded: 0 }))
     apiFetch<AuthConfig>('/admin/auth-config').then(setAuthConfig).catch(() => {
-      // Fallback to default config if endpoint not available
       setAuthConfig({
         auth_type: 'cognito',
         cognito_enabled: true,
         mcp_server_url: defaultMcpUrl,
       })
     })
-    
+    loadApiKeys()
+
     // Load saved settings from localStorage
     const savedApiKey = localStorage.getItem('bedrock_api_key') || ''
     const savedEndpoint = localStorage.getItem('bedrock_endpoint') || ''
     const savedMcpUrl = localStorage.getItem('mcp_server_url') || defaultMcpUrl
-    
+
     setBedrockApiKey(savedApiKey)
     setBedrockEndpoint(savedEndpoint)
     setMcpServerUrl(savedMcpUrl)
@@ -69,12 +109,12 @@ export function SettingsPage() {
   const handleSaveSettings = () => {
     setIsSaving(true)
     setShowSuccess(false)
-    
+
     // Save to localStorage
     localStorage.setItem('bedrock_api_key', bedrockApiKey)
     localStorage.setItem('bedrock_endpoint', bedrockEndpoint)
     localStorage.setItem('mcp_server_url', mcpServerUrl)
-    
+
     setTimeout(() => {
       setIsSaving(false)
       setShowSuccess(true)
@@ -86,6 +126,56 @@ export function SettingsPage() {
     await navigator.clipboard.writeText(text)
     setCopiedField(field)
     setTimeout(() => setCopiedField(null), 2000)
+  }
+
+  const handleGenerateKey = async () => {
+    setIsGenerating(true)
+    try {
+      const result = await apiFetch<{ api_key: string }>('/admin/api-keys/generate', {
+        method: 'POST',
+        body: JSON.stringify({ name: newKeyName || 'default' }),
+      })
+      setGeneratedKey(result.api_key)
+      loadApiKeys()
+    } catch (e: any) {
+      alert(e.message || 'Failed to generate key')
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  const handleRevokeKey = async (keyId: string) => {
+    try {
+      await apiFetch('/admin/api-keys/revoke', {
+        method: 'POST',
+        body: JSON.stringify({ api_key_id: keyId }),
+      })
+      loadApiKeys()
+    } catch (e: any) {
+      alert(e.message || 'Failed to revoke key')
+    } finally {
+      setRevokeKeyId(null)
+    }
+  }
+
+  const handleCreateCognitoClient = async () => {
+    setIsCreatingClient(true)
+    try {
+      const result = await apiFetch<{
+        client_id: string
+        client_secret: string
+        token_endpoint: string
+        scopes: string[]
+      }>('/admin/cognito/create-client', {
+        method: 'POST',
+        body: JSON.stringify({ client_name: cognitoClientName || 'mcp-client' }),
+      })
+      setCognitoCredentials(result)
+    } catch (e: any) {
+      alert(e.message || 'Failed to create client')
+    } finally {
+      setIsCreatingClient(false)
+    }
   }
 
   const isHealthy = health?.status === 'healthy'
@@ -181,7 +271,7 @@ export function SettingsPage() {
             </Badge>
           </div>
           <Separator />
-          
+
           {authConfig?.cognito_enabled && (
             <div className="space-y-4">
               {/* MCP Server URL */}
@@ -284,8 +374,8 @@ export function SettingsPage() {
               </div>
 
               <p className="text-xs text-muted-foreground">
-                Use OAuth 2.0 Client Credentials flow to obtain an access token, then include it as 
-                <code className="bg-muted px-1 mx-1 rounded">Authorization: Bearer &lt;token&gt;</code> 
+                Use OAuth 2.0 Client Credentials flow to obtain an access token, then include it as
+                <code className="bg-muted px-1 mx-1 rounded">Authorization: Bearer &lt;token&gt;</code>
                 header in MCP requests.
               </p>
             </div>
@@ -298,6 +388,288 @@ export function SettingsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* API Keys Card */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Key className="h-5 w-5" /> API Keys
+          </CardTitle>
+          <CardDescription>Manage persistent API keys for MCP server access</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <Button
+            onClick={() => {
+              setNewKeyName('')
+              setGeneratedKey(null)
+              setShowGenerateDialog(true)
+            }}
+            className="w-full"
+          >
+            <Plus className="h-4 w-4 mr-2" />
+            Generate New API Key
+          </Button>
+
+          {apiKeys.length > 0 && (
+            <div className="space-y-2">
+              {apiKeys.map((key) => (
+                <div
+                  key={key.api_key_id}
+                  className="flex items-center justify-between p-3 rounded-lg border"
+                >
+                  <div className="space-y-1 min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-sm">{key.name}</span>
+                      <Badge variant={key.status === 'active' ? 'default' : 'secondary'} className="text-xs">
+                        {key.status}
+                      </Badge>
+                    </div>
+                    <div className="text-xs text-muted-foreground font-mono">{key.key_prefix}</div>
+                    <div className="text-xs text-muted-foreground">
+                      Created: {new Date(key.created_at).toLocaleDateString()}
+                      {key.last_used_at && key.last_used_at !== 'never' && (
+                        <> &middot; Last used: {new Date(key.last_used_at).toLocaleDateString()}</>
+                      )}
+                    </div>
+                  </div>
+                  {key.status === 'active' && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => setRevokeKeyId(key.api_key_id)}
+                      title="Revoke key"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {apiKeys.length === 0 && (
+            <p className="text-sm text-muted-foreground text-center py-4">
+              No API keys configured. Generate one to enable API key authentication.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Generate Key Dialog */}
+      <Dialog open={showGenerateDialog} onOpenChange={setShowGenerateDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{generatedKey ? 'API Key Generated' : 'Generate New API Key'}</DialogTitle>
+            <DialogDescription>
+              {generatedKey
+                ? 'Copy your API key now. It will not be shown again.'
+                : 'Give your API key a name to help identify it later.'}
+            </DialogDescription>
+          </DialogHeader>
+
+          {!generatedKey ? (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="key-name">Key Name</Label>
+                <Input
+                  id="key-name"
+                  placeholder="e.g., production-gateway"
+                  value={newKeyName}
+                  onChange={(e) => setNewKeyName(e.target.value)}
+                />
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setShowGenerateDialog(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={handleGenerateKey} disabled={isGenerating}>
+                  {isGenerating ? 'Generating...' : 'Generate'}
+                </Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              <div className="space-y-3">
+                <div className="bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 rounded-lg p-3 flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                  <p className="text-xs text-amber-800 dark:text-amber-200">
+                    This key will only be shown once. Store it in a secure location.
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    value={generatedKey}
+                    readOnly
+                    className="font-mono text-xs bg-muted"
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() => handleCopy(generatedKey, 'generatedKey')}
+                  >
+                    {copiedField === 'generatedKey' ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                  </Button>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button onClick={() => setShowGenerateDialog(false)}>Done</Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Revoke Key Confirmation Dialog */}
+      <Dialog open={!!revokeKeyId} onOpenChange={() => setRevokeKeyId(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Revoke API Key</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to revoke this API key? Any clients using it will lose access immediately.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRevokeKeyId(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => revokeKeyId && handleRevokeKey(revokeKeyId)}
+            >
+              Revoke
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Cognito Credentials Card */}
+      {authConfig?.cognito_enabled && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Shield className="h-5 w-5" /> Cognito Credentials
+            </CardTitle>
+            <CardDescription>Provision new OAuth 2.0 client credentials for service-to-service access</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <Button
+              onClick={() => {
+                setCognitoClientName('')
+                setCognitoCredentials(null)
+                setShowCognitoDialog(true)
+              }}
+              className="w-full"
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              Request Credentials
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Creates a new Cognito app client with Client Credentials flow. The client secret is shown once and cannot be retrieved later.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Cognito Create Client Dialog */}
+      <Dialog open={showCognitoDialog} onOpenChange={setShowCognitoDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{cognitoCredentials ? 'Credentials Created' : 'Create OAuth Client'}</DialogTitle>
+            <DialogDescription>
+              {cognitoCredentials
+                ? 'Copy your credentials now. The client secret will not be shown again.'
+                : 'Name your OAuth client to identify it in the Cognito console.'}
+            </DialogDescription>
+          </DialogHeader>
+
+          {!cognitoCredentials ? (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="client-name">Client Name</Label>
+                <Input
+                  id="client-name"
+                  placeholder="e.g., my-agent-gateway"
+                  value={cognitoClientName}
+                  onChange={(e) => setCognitoClientName(e.target.value)}
+                />
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setShowCognitoDialog(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={handleCreateCognitoClient} disabled={isCreatingClient}>
+                  {isCreatingClient ? 'Creating...' : 'Create Client'}
+                </Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              <div className="space-y-3">
+                <div className="bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 rounded-lg p-3 flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                  <p className="text-xs text-amber-800 dark:text-amber-200">
+                    The client secret is shown once. Store it securely.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Client ID</Label>
+                  <div className="flex gap-2">
+                    <Input value={cognitoCredentials.client_id} readOnly className="font-mono text-xs bg-muted" />
+                    <Button variant="outline" size="icon" onClick={() => handleCopy(cognitoCredentials.client_id, 'cognitoClientId')}>
+                      {copiedField === 'cognitoClientId' ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Client Secret</Label>
+                  <div className="flex gap-2">
+                    <Input value={cognitoCredentials.client_secret} readOnly className="font-mono text-xs bg-muted" />
+                    <Button variant="outline" size="icon" onClick={() => handleCopy(cognitoCredentials.client_secret, 'cognitoClientSecret')}>
+                      {copiedField === 'cognitoClientSecret' ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Token Endpoint</Label>
+                  <div className="flex gap-2">
+                    <Input value={cognitoCredentials.token_endpoint} readOnly className="font-mono text-xs bg-muted" />
+                    <Button variant="outline" size="icon" onClick={() => handleCopy(cognitoCredentials.token_endpoint, 'cognitoTokenEndpoint')}>
+                      {copiedField === 'cognitoTokenEndpoint' ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Scopes</Label>
+                  <div className="flex gap-2">
+                    <Input value={cognitoCredentials.scopes.join(' ')} readOnly className="font-mono text-xs bg-muted" />
+                    <Button variant="outline" size="icon" onClick={() => handleCopy(cognitoCredentials.scopes.join(' '), 'cognitoScopes')}>
+                      {copiedField === 'cognitoScopes' ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">MCP Server URL</Label>
+                  <div className="flex gap-2">
+                    <Input value={mcpServerUrl} readOnly className="font-mono text-xs bg-muted" />
+                    <Button variant="outline" size="icon" onClick={() => handleCopy(mcpServerUrl, 'cognitoMcpUrl')}>
+                      {copiedField === 'cognitoMcpUrl' ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button onClick={() => setShowCognitoDialog(false)}>Done</Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <Card>
         <CardHeader>

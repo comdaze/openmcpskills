@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     dynamodb_endpoint_url: str | None = None
     dynamodb_skills_table: str = "mcp-skills"
     dynamodb_sessions_table: str = "mcp-sessions"
+    dynamodb_api_keys_table: str = "mcp-api-keys"
 
     # S3
     s3_endpoint_url: str | None = None

@@ -108,38 +108,21 @@ def get_s3_store_optional() -> S3SkillStore | None:
     return _s3_store
 
 
-async def verify_mcp_auth(
-    request: Request,
-    api_key_from_header: str | None = Security(api_key_header),
-    api_key_from_query: str | None = Security(api_key_query),
-    bearer_token: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+async def _verify_auth_internal(
+    bearer_token: HTTPAuthorizationCredentials | None,
+    api_key_from_header: str | None,
+    api_key_from_query: str | None,
+    required_scopes: list[str] | None = None,
 ) -> dict | str | None:
-    """Verify MCP authentication using multiple methods.
-
-    Supports:
-    1. Cognito JWT Bearer token (preferred for Quick Suite / AgentCore Gateway)
-    2. X-API-Key header (legacy)
-    3. api_key query string (legacy)
-
-    Auth priority: Bearer token > API Key header > API Key query
-
-    Returns:
-        - dict: Decoded JWT payload if Cognito auth is used
-        - str: API key if API key auth is used
-        - None: If auth is disabled
-        
-    Raises:
-        HTTPException 401 if auth is enabled and credentials are invalid.
-    """
+    """Shared auth verification logic used by both MCP and Admin auth deps."""
     settings = get_settings()
 
     # Check if Cognito auth is enabled (takes priority)
     if settings.cognito_enabled:
-        # Try Bearer token first
         if bearer_token:
             try:
                 from app.services.cognito_auth import get_cognito_service
-                
+
                 cognito_service = get_cognito_service()
                 if cognito_service is None:
                     logger.error("Cognito service not initialized but cognito_enabled=True")
@@ -147,12 +130,13 @@ async def verify_mcp_auth(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                         detail="Authentication service not available",
                     )
-                
-                # Verify the JWT token
-                payload = await cognito_service.verify_token(bearer_token.credentials)
+
+                payload = await cognito_service.verify_token(
+                    bearer_token.credentials, required_scopes=required_scopes
+                )
                 logger.debug(f"Cognito auth successful for client: {payload.get('client_id')}")
                 return payload
-                
+
             except ValueError as e:
                 logger.warning(f"Cognito token verification failed: {e}")
                 raise HTTPException(
@@ -160,38 +144,92 @@ async def verify_mcp_auth(
                     detail=f"Invalid token: {e}",
                     headers={"WWW-Authenticate": "Bearer"},
                 )
-        
-        # No bearer token provided when Cognito is enabled
-        # Check if we should also allow API key fallback
+
+        # No bearer token when Cognito is enabled — fall through to API key only if also enabled
         if not settings.mcp_auth_enabled:
-            # Cognito is enabled but no token - reject
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Authorization token required",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+    elif bearer_token:
+        # Cognito disabled but Bearer token present (e.g. local OAuth from
+        # MCP Streamable HTTP clients like Kiro).  Accept it as passthrough
+        # when API key auth is also disabled; otherwise try it as an API key.
+        if not settings.mcp_auth_enabled:
+            logger.debug("Accepting Bearer token (local OAuth passthrough)")
+            return {"sub": "local-oauth", "token": bearer_token.credentials}
+        # When API key auth is enabled, treat Bearer credentials as a potential API key
+        api_key_from_header = api_key_from_header or bearer_token.credentials
 
     # Fall back to API key authentication
     if settings.mcp_auth_enabled:
-        # No API keys configured - allow all (dev mode warning logged elsewhere)
-        if not settings.mcp_api_keys_list:
-            return None
-
-        # Try header first, then query string
         api_key = api_key_from_header or api_key_from_query
 
-        # Validate the provided key
-        if not api_key or api_key not in settings.mcp_api_keys_list:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or missing API key",
-                headers={"WWW-Authenticate": "ApiKey"},
-            )
+        # Check env-var keys first (backward compat)
+        if settings.mcp_api_keys_list:
+            if api_key and api_key in settings.mcp_api_keys_list:
+                return api_key
 
-        return api_key
+        # Check DynamoDB keys
+        if api_key:
+            from app.services.api_key_store import get_api_key_store
 
-    # No auth enabled - allow all requests
+            store = get_api_key_store()
+            if store:
+                key_id = await store.verify_key(api_key)
+                if key_id:
+                    return api_key
+
+        # No valid keys configured at all — dev mode passthrough
+        if not settings.mcp_api_keys_list:
+            from app.services.api_key_store import get_api_key_store
+
+            store = get_api_key_store()
+            if not store or store.active_count == 0:
+                return None
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
+
+    # No auth enabled — allow all requests
     return None
+
+
+async def verify_mcp_auth(
+    request: Request,
+    api_key_from_header: str | None = Security(api_key_header),
+    api_key_from_query: str | None = Security(api_key_query),
+    bearer_token: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+) -> dict | str | None:
+    """Verify MCP authentication — requires openmcpskills-api/mcp scope for JWT."""
+    return await _verify_auth_internal(
+        bearer_token, api_key_from_header, api_key_from_query,
+        required_scopes=["openmcpskills-api/mcp"],
+    )
+
+
+async def verify_admin_auth(
+    request: Request,
+    api_key_from_header: str | None = Security(api_key_header),
+    api_key_from_query: str | None = Security(api_key_query),
+    bearer_token: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+) -> dict | str | None:
+    """Verify admin authentication — requires openmcpskills-api/admin scope for JWT.
+
+    When all auth is disabled (cognito_enabled=False AND mcp_auth_enabled=False),
+    returns None (passthrough) to avoid chicken-and-egg issues during setup.
+    """
+    settings = get_settings()
+    if not settings.cognito_enabled and not settings.mcp_auth_enabled:
+        return None
+    return await _verify_auth_internal(
+        bearer_token, api_key_from_header, api_key_from_query,
+        required_scopes=["openmcpskills-api/admin"],
+    )
 
 
 # Legacy function - kept for backward compatibility
@@ -233,3 +271,4 @@ SessionManagerDep = Annotated[SessionManager, Depends(get_session_manager)]
 MCPEngineDep = Annotated[MCPEngine, Depends(get_mcp_engine)]
 MCPApiKeyDep = Annotated[str | None, Depends(verify_mcp_api_key)]
 MCPAuthDep = Annotated[dict | str | None, Depends(verify_mcp_auth)]
+AdminAuthDep = Annotated[dict | str | None, Depends(verify_admin_auth)]
