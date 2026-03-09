@@ -310,8 +310,10 @@ def create_app() -> FastAPI:
             resource = _settings.mcp_server_url or "http://127.0.0.1:8000/mcp"
             base = resource.removesuffix("/mcp")
             scopes = _settings.cognito_scopes_list or ["openmcpskills-api/mcp", "openmcpskills-api/read"]
+            domain_base = _settings.cognito_token_endpoint.rsplit("/oauth2/token", 1)[0]
             return {
                 "issuer": base,
+                "authorization_endpoint": f"{domain_base}/oauth2/authorize",
                 "token_endpoint": _settings.cognito_token_endpoint,
                 "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
                 "response_types_supported": ["code"],
