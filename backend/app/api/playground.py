@@ -402,8 +402,22 @@ async def chat(request: ChatRequest):
                         }
                     })
             
+            # Convert Bedrock response blocks to Bedrock request format
+            bedrock_assistant_content = []
+            for block in content_blocks:
+                if block.get("type") == "text":
+                    bedrock_assistant_content.append({"text": block.get("text", "")})
+                elif block.get("type") == "tool_use":
+                    bedrock_assistant_content.append({
+                        "toolUse": {
+                            "toolUseId": block.get("id", ""),
+                            "name": block.get("name", ""),
+                            "input": block.get("input", {}),
+                        }
+                    })
+
             # Add assistant message and tool results to conversation
-            messages.append({"role": "assistant", "content": content_blocks})
+            messages.append({"role": "assistant", "content": bedrock_assistant_content})
             messages.append({"role": "user", "content": tool_results})
             body["messages"] = messages
 
