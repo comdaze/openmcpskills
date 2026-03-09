@@ -12,7 +12,7 @@ from typing import Annotated, Any, AsyncGenerator
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import get_mcp_engine, get_session_manager
+from app.api.deps import get_mcp_engine, get_session_manager, verify_mcp_auth, MCPAuthDep
 from app.services.mcp_engine import MCPEngine
 from app.services.session_manager import SessionManager
 
@@ -38,6 +38,7 @@ async def mcp_endpoint(
     request: Request,
     mcp_engine: Annotated[MCPEngine, Depends(get_mcp_engine)],
     session_manager: Annotated[SessionManager, Depends(get_session_manager)],
+    _auth: MCPAuthDep,
     mcp_session_id: Annotated[str | None, Header(alias="Mcp-Session-Id")] = None,
     accept: Annotated[str | None, Header()] = None,
 ) -> Response:
@@ -218,6 +219,7 @@ async def mcp_sse_endpoint(
     request: Request,
     mcp_engine: Annotated[MCPEngine, Depends(get_mcp_engine)],
     session_manager: Annotated[SessionManager, Depends(get_session_manager)],
+    _auth: MCPAuthDep,
     mcp_session_id: Annotated[str | None, Header(alias="Mcp-Session-Id")] = None,
 ) -> StreamingResponse:
     """SSE endpoint for server-initiated events.
@@ -267,6 +269,7 @@ async def mcp_sse_endpoint(
 @router.delete("/")
 async def close_session(
     session_manager: Annotated[SessionManager, Depends(get_session_manager)],
+    _auth: MCPAuthDep,
     mcp_session_id: Annotated[str | None, Header(alias="Mcp-Session-Id")] = None,
 ) -> Response:
     """Close an MCP session.

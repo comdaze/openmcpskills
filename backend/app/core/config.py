@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     dynamodb_endpoint_url: str | None = None
     dynamodb_skills_table: str = "mcp-skills"
     dynamodb_sessions_table: str = "mcp-sessions"
+    dynamodb_api_keys_table: str = "mcp-api-keys"
 
     # S3
     s3_endpoint_url: str | None = None
@@ -58,16 +59,46 @@ class Settings(BaseSettings):
     dynamodb_invocation_logs_table: str = "mcp-invocation-logs"
     invocation_log_ttl_days: int = 30
 
-    # Authentication (AWS Cognito)
+    # Authentication (AWS Cognito S2S)
     cognito_enabled: bool = False
     cognito_user_pool_id: str | None = None
-    cognito_client_id: str | None = None
+    cognito_client_id: str | None = None  # App client ID for this service (if acting as client)
+    cognito_allowed_client_ids: str = ""  # Comma-separated allowed client IDs for incoming requests
     cognito_region: str | None = None
+    cognito_token_endpoint: str | None = None  # OAuth2 token endpoint
+    cognito_discovery_url: str | None = None  # OpenID Connect discovery URL
+    cognito_resource_server: str | None = None  # Resource server identifier
+    cognito_scopes: str = ""  # Comma-separated required scopes for access
+
+    @property
+    def cognito_allowed_client_ids_list(self) -> list[str]:
+        """Get allowed client IDs as list."""
+        if not self.cognito_allowed_client_ids:
+            return []
+        return [k.strip() for k in self.cognito_allowed_client_ids.split(",") if k.strip()]
+
+    @property
+    def cognito_scopes_list(self) -> list[str]:
+        """Get scopes as list."""
+        if not self.cognito_scopes:
+            return []
+        return [k.strip() for k in self.cognito_scopes.split(",") if k.strip()]
 
     # Rate Limiting
     rate_limit_enabled: bool = True
     rate_limit_requests: int = 100
     rate_limit_window_seconds: int = 60
+
+    # MCP API Key Authentication
+    mcp_auth_enabled: bool = False  # Enable in production
+    mcp_api_keys: str = ""  # Comma-separated in env: "key1,key2,key3"
+
+    @property
+    def mcp_api_keys_list(self) -> list[str]:
+        """Get API keys as list."""
+        if not self.mcp_api_keys:
+            return []
+        return [k.strip() for k in self.mcp_api_keys.split(",") if k.strip()]
 
     # Sandbox Configuration
     sandbox_enabled: bool = True

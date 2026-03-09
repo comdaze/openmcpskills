@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.api.deps import get_skill_loader, get_s3_store, get_s3_store_optional
+from app.api.deps import AdminAuthDep, get_skill_loader, get_s3_store, get_s3_store_optional
 from app.core.config import get_settings
 from app.models.skill import Skill, SkillManifest, SkillMetadata, SkillStatus
 from app.services.skill_loader import SkillLoader
@@ -211,6 +211,7 @@ async def reload_skill(
     skill_id: str,
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
     s3_store: Annotated[S3SkillStore, Depends(get_s3_store)],
+    _auth: AdminAuthDep = None,
 ) -> SkillResponse:
     """Reload a skill (hot reload).
     
@@ -227,6 +228,7 @@ async def reload_skill(
 async def delete_skill(
     skill_id: str,
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    _auth: AdminAuthDep = None,
 ) -> dict[str, str]:
     """Unload a skill and remove its files from disk."""
     import shutil
@@ -248,6 +250,7 @@ async def delete_skill(
 @router.post("/skills/reload-all")
 async def reload_all_skills(
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    _auth: AdminAuthDep = None,
 ) -> dict[str, Any]:
     """Reload all skills from the skills directory."""
     count = await skill_loader.load_from_directory()
@@ -260,6 +263,7 @@ async def reload_all_skills(
 @router.post("/skills/validate", response_model=ValidationResponse)
 async def validate_skill_package(
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    _auth: AdminAuthDep = None,
     file: UploadFile = File(...),
 ) -> ValidationResponse:
     """Validate an uploaded skill package.
@@ -305,6 +309,7 @@ async def validate_skill_package(
 @router.post("/skills/upload")
 async def upload_skill_package(
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    _auth: AdminAuthDep = None,
     file: UploadFile = File(...),
 ) -> SkillResponse:
     """Upload and install a Claude Skill package.
@@ -419,6 +424,7 @@ async def rollback_skill(
     skill_id: str,
     body: RollbackRequest,
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    _auth: AdminAuthDep = None,
 ) -> dict[str, str]:
     """Rollback a skill to a specific version (S3 mode only)."""
     settings = get_settings()
@@ -482,6 +488,7 @@ class GitHubImportRequest(BaseModel):
 async def import_from_github(
     req: GitHubImportRequest,
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    _auth: AdminAuthDep = None,
 ) -> dict[str, Any]:
     """Import skills from a GitHub repository URL.
     
@@ -601,6 +608,7 @@ class GenerateSkillRequest(BaseModel):
 async def generate_skill(
     req: GenerateSkillRequest,
     skill_loader: Annotated[SkillLoader, Depends(get_skill_loader)],
+    _auth: AdminAuthDep = None,
 ) -> SkillResponse:
     """Generate a skill from a documentation site, GitHub repo, or PDF.
 
@@ -834,3 +842,402 @@ async def stream_file(s3_key: str):
         media_type=content_type,
         headers=headers,
     )
+
+
+@router.get("/f/{short_id}")
+async def short_link_redirect(short_id: str):
+    """Redirect short link to file download.
+
+    Short links are stored in DynamoDB with session_id = 'file:{short_id}'.
+    This avoids URL encoding issues with platforms like Feishu that encode
+    underscores and other characters in URLs.
+
+    Args:
+        short_id: 8-character alphanumeric short link ID
+    """
+    settings = get_settings()
+
+    # Validate short_id format (alphanumeric only)
+    if not short_id.isalnum() or len(short_id) != 8:
+        raise HTTPException(status_code=400, detail="Invalid short link format")
+
+    # Look up in DynamoDB
+    import boto3
+    dynamodb = boto3.resource("dynamodb", region_name=settings.aws_region)
+    table = dynamodb.Table(settings.dynamodb_sessions_table)
+
+    try:
+        response = table.get_item(Key={"session_id": f"file:{short_id}"})
+    except Exception as e:
+        logger.error(f"DynamoDB lookup failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to look up short link")
+
+    item = response.get("Item")
+    if not item:
+        raise HTTPException(status_code=404, detail="Short link not found or expired")
+
+    s3_key = item.get("s3_key")
+    if not s3_key:
+        raise HTTPException(status_code=500, detail="Invalid short link data")
+
+    # Stream file directly (same as /files/stream)
+    bucket = item.get("s3_bucket") or settings.code_interpreter_s3_bucket
+    if not bucket:
+        raise HTTPException(status_code=500, detail="S3 bucket not configured")
+
+    from botocore.config import Config as BotoConfig
+    s3_kwargs: dict = {
+        "region_name": settings.aws_region,
+        "config": BotoConfig(signature_version="s3v4"),
+    }
+    if settings.aws_access_key_id and settings.aws_secret_access_key:
+        s3_kwargs["aws_access_key_id"] = settings.aws_access_key_id
+        s3_kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
+    s3 = boto3.client("s3", **s3_kwargs)
+
+    try:
+        response = s3.get_object(Bucket=bucket, Key=s3_key)
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code in ("NoSuchKey", "404"):
+            raise HTTPException(status_code=404, detail="File not found")
+        logger.error(f"S3 get_object failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve file")
+
+    # Get filename from DynamoDB item or extract from s3_key
+    filename = item.get("filename") or s3_key.rsplit("/", 1)[-1]
+    if "_" in filename and filename.split("_", 1)[0].isdigit():
+        filename = filename.split("_", 1)[1]
+
+    content_type = response.get("ContentType", "application/octet-stream")
+    content_length = response.get("ContentLength")
+
+    from urllib.parse import quote
+    ascii_filename = filename.encode("ascii", "replace").decode("ascii")
+    headers = {
+        "Content-Disposition": (
+            f"attachment; filename=\"{ascii_filename}\"; "
+            f"filename*=UTF-8''{quote(filename)}"
+        ),
+    }
+    if content_length:
+        headers["Content-Length"] = str(content_length)
+
+    def stream_body():
+        body = response["Body"]
+        while chunk := body.read(64 * 1024):
+            yield chunk
+
+    return StreamingResponse(
+        stream_body(),
+        media_type=content_type,
+        headers=headers,
+    )
+
+
+# ---- API Key Management (DynamoDB-backed) ----
+
+class GenerateApiKeyRequest(BaseModel):
+    """Request to generate an API key."""
+    name: str = "default"
+
+
+class GenerateApiKeyResponse(BaseModel):
+    """Response from API key generation."""
+    api_key: str
+    api_key_id: str
+    key_prefix: str
+    name: str
+    message: str
+
+
+class ApiKeyStatusResponse(BaseModel):
+    """Response with API key authentication status."""
+    auth_enabled: bool
+    keys_configured: int
+    message: str
+
+
+class ApiKeyInfo(BaseModel):
+    """Public info about an API key (no secrets)."""
+    api_key_id: str
+    key_prefix: str
+    name: str
+    created_at: str
+    last_used_at: str
+    status: str
+
+
+class RevokeApiKeyRequest(BaseModel):
+    """Request to revoke an API key."""
+    api_key_id: str
+
+
+@router.post("/api-keys/generate", response_model=GenerateApiKeyResponse)
+async def generate_api_key(
+    req: GenerateApiKeyRequest | None = None,
+    _auth: AdminAuthDep = None,
+) -> GenerateApiKeyResponse:
+    """Generate a new MCP API key (persisted in DynamoDB).
+
+    The raw key is returned only once and cannot be retrieved later.
+    """
+    from app.services.api_key_store import get_api_key_store
+
+    store = get_api_key_store()
+    if store is None:
+        raise HTTPException(status_code=500, detail="API key store not initialized")
+
+    name = req.name if req else "default"
+    result = await store.generate_key(name)
+
+    return GenerateApiKeyResponse(
+        api_key=result["raw_key"],
+        api_key_id=result["api_key_id"],
+        key_prefix=result["key_prefix"],
+        name=name,
+        message="API key generated successfully. Store it securely — it cannot be retrieved again.",
+    )
+
+
+@router.get("/api-keys", response_model=list[ApiKeyInfo])
+async def list_api_keys(_auth: AdminAuthDep = None) -> list[ApiKeyInfo]:
+    """List all API keys (prefix only, no secrets)."""
+    from app.services.api_key_store import get_api_key_store
+
+    store = get_api_key_store()
+    if store is None:
+        return []
+
+    keys = await store.list_keys()
+    return [ApiKeyInfo(**k) for k in keys]
+
+
+@router.get("/api-keys/status", response_model=ApiKeyStatusResponse)
+async def get_api_key_status() -> ApiKeyStatusResponse:
+    """Get the current API key authentication status."""
+    settings = get_settings()
+
+    from app.services.api_key_store import get_api_key_store
+
+    store = get_api_key_store()
+    env_count = len(settings.mcp_api_keys_list)
+    dynamo_count = store.active_count if store else 0
+    total = env_count + dynamo_count
+
+    return ApiKeyStatusResponse(
+        auth_enabled=settings.mcp_auth_enabled,
+        keys_configured=total,
+        message="API key authentication is " + ("enabled" if settings.mcp_auth_enabled else "disabled"),
+    )
+
+
+@router.post("/api-keys/revoke")
+async def revoke_api_key(
+    req: RevokeApiKeyRequest,
+    _auth: AdminAuthDep = None,
+) -> dict[str, str]:
+    """Revoke an API key by ID (persisted in DynamoDB)."""
+    from app.services.api_key_store import get_api_key_store
+
+    store = get_api_key_store()
+    if store is None:
+        raise HTTPException(status_code=500, detail="API key store not initialized")
+
+    success = await store.revoke_key(req.api_key_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    return {"message": f"API key {req.api_key_id} revoked successfully"}
+
+
+# ---- Authentication Configuration ----
+
+class AuthConfigResponse(BaseModel):
+    """Response with authentication configuration for frontend display."""
+    auth_type: str  # 'cognito', 'api_key', or 'none'
+    cognito_enabled: bool
+    cognito_region: str | None = None
+    cognito_user_pool_id: str | None = None
+    token_endpoint: str | None = None
+    client_id: str | None = None
+    scopes: str | None = None
+    mcp_server_url: str
+
+
+@router.get("/auth-config", response_model=AuthConfigResponse)
+async def get_auth_config() -> AuthConfigResponse:
+    """Get authentication configuration for MCP integration.
+    
+    Returns OAuth 2.0 (Cognito S2S) configuration details that clients
+    need to authenticate with the MCP server.
+    
+    Note: Client Secret is NOT returned for security reasons.
+    Administrators should provide it separately through secure channels.
+    """
+    settings = get_settings()
+    
+    # Determine auth type
+    if settings.cognito_enabled:
+        auth_type = "cognito"
+    elif settings.mcp_auth_enabled:
+        auth_type = "api_key"
+    else:
+        auth_type = "none"
+    
+    # Build token endpoint URL if Cognito is enabled
+    token_endpoint = None
+    if settings.cognito_enabled and settings.cognito_user_pool_id:
+        cognito_region = settings.cognito_region or settings.aws_region
+        # Try to use configured token endpoint, or construct from user pool
+        token_endpoint = settings.cognito_token_endpoint
+        # Note: Domain prefix is not easily derivable, so we rely on configured endpoint
+    
+    return AuthConfigResponse(
+        auth_type=auth_type,
+        cognito_enabled=settings.cognito_enabled,
+        cognito_region=settings.cognito_region or settings.aws_region,
+        cognito_user_pool_id=settings.cognito_user_pool_id if settings.cognito_enabled else None,
+        token_endpoint=token_endpoint,
+        client_id=settings.cognito_client_id if settings.cognito_enabled else None,
+        scopes=" ".join(settings.cognito_scopes_list) if settings.cognito_scopes_list else "openmcpskills-api/mcp openmcpskills-api/read",
+        mcp_server_url=settings.mcp_server_url,
+    )
+
+
+# ---- Cognito Client Provisioning ----
+
+class CreateCognitoClientRequest(BaseModel):
+    """Request to create a Cognito app client."""
+    client_name: str
+
+
+class CreateCognitoClientResponse(BaseModel):
+    """Response with new Cognito client credentials (shown once)."""
+    client_id: str
+    client_secret: str
+    token_endpoint: str
+    scopes: list[str]
+    message: str
+
+
+@router.post("/cognito/create-client", response_model=CreateCognitoClientResponse)
+async def create_cognito_client(
+    req: CreateCognitoClientRequest,
+    _auth: AdminAuthDep = None,
+) -> CreateCognitoClientResponse:
+    """Create a new Cognito app client with client_credentials flow.
+
+    Returns the client_id and client_secret once — the secret cannot be
+    retrieved later.
+    """
+    settings = get_settings()
+
+    if not settings.cognito_enabled:
+        raise HTTPException(status_code=400, detail="Cognito authentication is not enabled")
+
+    from app.services.cognito_auth import get_cognito_service
+
+    cognito_service = get_cognito_service()
+    if cognito_service is None:
+        raise HTTPException(status_code=500, detail="Cognito service not initialized")
+
+    scopes = settings.cognito_scopes_list or [
+        "openmcpskills-api/mcp",
+        "openmcpskills-api/read",
+    ]
+
+    try:
+        result = await cognito_service.create_app_client(req.client_name, scopes)
+    except Exception as e:
+        logger.error("Failed to create Cognito client: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to create client: {e}")
+
+    token_endpoint = settings.cognito_token_endpoint or ""
+
+    return CreateCognitoClientResponse(
+        client_id=result["client_id"],
+        client_secret=result["client_secret"],
+        token_endpoint=token_endpoint,
+        scopes=scopes,
+        message="Client created successfully. Store the client_secret securely — it cannot be retrieved again.",
+    )
+
+
+class RevokeCognitoClientRequest(BaseModel):
+    """Request to revoke (delete) a Cognito app client."""
+    client_id: str
+
+
+@router.post("/cognito/revoke-client")
+async def revoke_cognito_client(
+    req: RevokeCognitoClientRequest,
+    _auth: AdminAuthDep = None,
+) -> dict:
+    """Delete a Cognito app client, revoking all its tokens."""
+    settings = get_settings()
+
+    if not settings.cognito_enabled or not settings.cognito_user_pool_id:
+        raise HTTPException(status_code=400, detail="Cognito authentication is not enabled")
+
+    import aioboto3
+
+    session = aioboto3.Session()
+    try:
+        async with session.client("cognito-idp", region_name=settings.cognito_region or settings.aws_region) as cog:
+            await cog.delete_user_pool_client(
+                UserPoolId=settings.cognito_user_pool_id,
+                ClientId=req.client_id,
+            )
+    except Exception as e:
+        logger.error("Failed to revoke Cognito client %s: %s", req.client_id, e)
+        raise HTTPException(status_code=500, detail=f"Failed to revoke client: {e}")
+
+    return {"message": f"Cognito client {req.client_id} revoked successfully"}
+
+
+class CognitoClientInfo(BaseModel):
+    """Info about an existing Cognito app client (no secrets)."""
+    client_id: str
+    client_name: str
+    created_at: str
+    scopes: list[str]
+
+
+@router.get("/cognito/clients", response_model=list[CognitoClientInfo])
+async def list_cognito_clients(_auth: AdminAuthDep = None) -> list[CognitoClientInfo]:
+    """List all Cognito app clients (without secrets)."""
+    settings = get_settings()
+
+    if not settings.cognito_enabled or not settings.cognito_user_pool_id:
+        return []
+
+    import aioboto3
+
+    session = aioboto3.Session()
+    clients_out: list[CognitoClientInfo] = []
+    try:
+        async with session.client("cognito-idp", region_name=settings.cognito_region or settings.aws_region) as cog:
+            resp = await cog.list_user_pool_clients(
+                UserPoolId=settings.cognito_user_pool_id, MaxResults=60
+            )
+            for c in resp.get("UserPoolClients", []):
+                detail = await cog.describe_user_pool_client(
+                    UserPoolId=settings.cognito_user_pool_id,
+                    ClientId=c["ClientId"],
+                )
+                uc = detail["UserPoolClient"]
+                # Only show clients with client_credentials flow (M2M)
+                if "client_credentials" not in uc.get("AllowedOAuthFlows", []):
+                    continue
+                clients_out.append(CognitoClientInfo(
+                    client_id=uc["ClientId"],
+                    client_name=uc.get("ClientName", ""),
+                    created_at=uc.get("CreationDate", "").isoformat() if hasattr(uc.get("CreationDate", ""), "isoformat") else str(uc.get("CreationDate", "")),
+                    scopes=uc.get("AllowedOAuthScopes", []),
+                ))
+    except Exception as e:
+        logger.error("Failed to list Cognito clients: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to list clients: {e}")
+
+    return clients_out
