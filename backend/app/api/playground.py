@@ -386,9 +386,10 @@ async def chat(request: ChatRequest):
                     })
                     
                     tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": result
+                        "toolResult": {
+                            "toolUseId": tool_use_id,
+                            "content": [{"text": result}],
+                        }
                     })
             
             # Add assistant message and tool results to conversation
@@ -676,9 +677,10 @@ async def chat_websocket(websocket: WebSocket):
                     await websocket.send_json(tool_result_msg)
                     
                     tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": result
+                        "toolResult": {
+                            "toolUseId": tool_use_id,
+                            "content": [{"text": result}],
+                        }
                     })
             
             # Add assistant message and tool results to conversation
