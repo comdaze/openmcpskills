@@ -501,13 +501,25 @@ async def import_from_github(
     import tempfile
     import subprocess
 
-    # Parse GitHub URL
-    pattern = r"https://github\.com/([^/]+)/([^/]+)/tree/([^/]+)/?(.*)"
-    match = re.match(pattern, req.url)
-    if not match:
-        raise HTTPException(status_code=400, detail="Invalid GitHub URL format")
-
-    owner, repo, branch, path = match.groups()
+    # Parse GitHub URL — support multiple formats:
+    #   https://github.com/owner/repo/tree/branch/path
+    #   https://github.com/owner/repo  (defaults to branch=main, path="")
+    url = req.url.rstrip("/")
+    tree_pattern = r"https://github\.com/([^/]+)/([^/]+)/tree/([^/]+)/?(.*)"
+    short_pattern = r"https://github\.com/([^/]+)/([^/]+)$"
+    match = re.match(tree_pattern, url)
+    if match:
+        owner, repo, branch, path = match.groups()
+    else:
+        match = re.match(short_pattern, url)
+        if not match:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid GitHub URL. Use: https://github.com/owner/repo or https://github.com/owner/repo/tree/branch/path"
+            )
+        owner, repo = match.groups()
+        branch = "main"
+        path = ""
     path = path.rstrip("/")
 
     settings = get_settings()
