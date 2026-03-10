@@ -434,37 +434,32 @@ class MCPEngine:
             code_context += "\nAny files your code creates will be automatically uploaded to S3 and download links will be provided to the user.\n"
             code_context += lang_note
 
-            code_context += "\n## Incremental Generation (for large outputs)\n\n"
+            code_context += "\n## Incremental Generation (only when needed)\n\n"
             code_context += (
-                "If the output is large (e.g. a presentation with many slides, "
-                "a long document with many sections), **split the work across "
-                "multiple `execute-code` calls** to avoid code truncation:\n\n"
+                "**Default**: Generate all code in a single `execute-code` call. "
+                "This is simpler and faster.\n\n"
             )
             code_context += (
-                "1. **First call**: Generate code for the first few slides/sections. "
-                "Set `keep_session: true`. The response will include a `session_id`.\n"
+                "**Only use incremental mode** when the code would be very long "
+                "and risks truncation (e.g. a presentation with 10+ slides, "
+                "a document with 8+ pages). In that case, split across multiple "
+                "`execute-code` calls using `session_id` + `keep_session`:\n\n"
             )
             code_context += (
-                "2. **Middle calls**: Use the returned `session_id` and `keep_session: true`. "
-                "Your code runs in the same sandbox — all files from previous calls are still there. "
-                "Continue building (e.g. add more slides to the same file).\n"
+                "1. **First call**: Generate code for the first batch. "
+                "Set `keep_session: true`. The response returns a `session_id`.\n"
             )
             code_context += (
-                "3. **Final call**: Use the `session_id` but set `keep_session: false` (or omit it). "
-                "This collects all generated files and returns download links.\n\n"
+                "2. **Middle calls**: Pass the `session_id` and `keep_session: true`. "
+                "The same sandbox is reused — files from previous calls persist.\n"
             )
             code_context += (
-                "**Key rule**: Each call's code should be **small and self-contained** "
-                "(~2-4 slides or sections). The sandbox filesystem persists between calls, "
-                "so you can append to files, read previous output, etc.\n\n"
+                "3. **Final call**: Pass the `session_id`, set `keep_session: false` (or omit). "
+                "Output files are collected and download links returned.\n\n"
             )
             code_context += (
-                "**Example pattern** (3-call PPTX generation):\n"
-                "```\n"
-                "Call 1: keep_session=true  → create pptx, add slides 1-4, save to output.pptx\n"
-                "Call 2: keep_session=true, session_id=<id>  → load output.pptx, add slides 5-8, save\n"
-                "Call 3: keep_session=false, session_id=<id> → load output.pptx, add slides 9-12, save → gets download link\n"
-                "```\n"
+                "Each chunk should be self-contained (~3-4 slides or sections). "
+                "For simple/short outputs, do NOT use incremental mode.\n"
             )
             
             instruction_content += code_context
