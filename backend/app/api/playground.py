@@ -679,15 +679,24 @@ async def chat_websocket(websocket: WebSocket):
                         result = await call_mcp_tool(mcp_url, tool_name, tool_input)
                         execution_info = None
                         files = []
-                    
+
+                    # Append file download links to result so the model can reference them
+                    result_for_model = result
+                    if files:
+                        links = "\n\nGenerated files:\n" + "\n".join(
+                            f"- [{f.get('filename', 'file')}]({f.get('download_url', '')})"
+                            for f in files
+                        )
+                        result_for_model = result + links
+
                     # Record tool call
                     all_tool_calls.append({
                         "name": tool_name,
                         "input": tool_input,
                         "result": result
                     })
-                    
-                    # Send tool result with execution info
+
+                    # Send tool result with execution info to frontend
                     tool_result_msg = {
                         "type": "tool_result",
                         "name": tool_name,
@@ -697,13 +706,14 @@ async def chat_websocket(websocket: WebSocket):
                         tool_result_msg["execution"] = execution_info
                     if files:
                         tool_result_msg["files"] = files
-                    
+
                     await websocket.send_json(tool_result_msg)
-                    
+
+                    # Send result with file links to Bedrock so model can mention them
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
-                        "content": result,
+                        "content": result_for_model,
                     })
 
             # Add assistant message and tool results to conversation
