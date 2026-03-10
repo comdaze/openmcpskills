@@ -61,21 +61,51 @@ export function createPlaygroundAdapter(
         if (abortSignal.aborted) reject(new DOMException("Aborted", "AbortError"));
       });
 
-      // Send the request (new messages format)
-      ws.send(JSON.stringify({
-        messages: messages.map(m => ({
-          role: m.role,
-          content: m.content.map(c => {
-            if (c.type === "text") return { type: "text", text: c.text };
-            if (c.type === "tool-call") return {
+      // Build messages in Anthropic Messages API format.
+      // When an assistant message contains tool-call parts with results,
+      // we must emit the assistant message (with tool_use blocks) followed
+      // by a user message (with tool_result blocks) — Anthropic requires this.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const apiMessages: any[] = [];
+      for (const m of messages) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const content: any[] = [];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const toolResults: any[] = [];
+
+        for (const c of m.content) {
+          if (c.type === "text") {
+            content.push({ type: "text", text: c.text });
+          } else if (c.type === "tool-call") {
+            content.push({
               type: "tool_use",
               id: c.toolCallId,
               name: c.toolName,
               input: c.args,
-            };
-            return c;
-          }),
-        })),
+            });
+            // If this tool call has a result, queue a tool_result block
+            if (c.result !== undefined) {
+              toolResults.push({
+                type: "tool_result",
+                tool_use_id: c.toolCallId,
+                content: typeof c.result === "string" ? c.result : JSON.stringify(c.result),
+              });
+            }
+          } else {
+            content.push(c);
+          }
+        }
+
+        apiMessages.push({ role: m.role, content });
+
+        // Append the required user tool_result message after the assistant message
+        if (toolResults.length > 0) {
+          apiMessages.push({ role: "user", content: toolResults });
+        }
+      }
+
+      ws.send(JSON.stringify({
+        messages: apiMessages,
         model: config.model,
         useMcpServer: config.useMcpServer,
         mcpServerUrl,
