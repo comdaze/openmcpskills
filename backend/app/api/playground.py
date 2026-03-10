@@ -505,6 +505,19 @@ async def chat_websocket(websocket: WebSocket):
         all_tool_calls = []
 
         for iteration in range(max_iterations):
+            # Debug: log message structure before calling Bedrock
+            for mi, msg in enumerate(messages):
+                role = msg.get("role", "?")
+                content = msg.get("content")
+                if isinstance(content, str):
+                    logger.info(f"messages[{mi}] role={role} content=str({len(content)} chars)")
+                elif isinstance(content, list):
+                    types = [b.get("type", "?") if isinstance(b, dict) else "str" for b in content]
+                    ids = [b.get("id") or b.get("tool_use_id", "") for b in content if isinstance(b, dict) and b.get("type") in ("tool_use", "tool_result")]
+                    logger.info(f"messages[{mi}] role={role} content=list({types}) ids={ids}")
+                else:
+                    logger.info(f"messages[{mi}] role={role} content={type(content)}")
+
             # Use streaming API
             response = await asyncio.to_thread(
                 bedrock.invoke_model_with_response_stream,
@@ -530,8 +543,12 @@ async def chat_websocket(websocket: WebSocket):
             current_text = ""
             stop_reason = None
             tool_input_buffers = {}  # Buffer for accumulating tool inputs
+            tool_block_names = {}   # Map block_index -> tool name for early notification
             event_count = 0
+            import time as _time
+            last_keepalive = _time.monotonic()
 
+            stream_error = False
             while True:
                 raw_event = await asyncio.get_event_loop().run_in_executor(None, _next_event)
                 if raw_event is _STREAM_END:
@@ -539,6 +556,7 @@ async def chat_websocket(websocket: WebSocket):
                     break
                 if isinstance(raw_event, Exception):
                     logger.error(f"Bedrock stream error after {event_count} events: {raw_event}")
+                    stream_error = True
                     break
 
                 event_count += 1
@@ -553,6 +571,13 @@ async def chat_websocket(websocket: WebSocket):
                     elif block['type'] == 'tool_use':
                         # Initialize input buffer for this tool
                         tool_input_buffers[block_index_start] = ""
+                        tool_block_names[block_index_start] = block.get('name', '')
+                        # Send early notification so frontend shows tool call immediately
+                        await websocket.send_json({
+                            "type": "tool_call_start",
+                            "name": block.get('name', ''),
+                            "id": block.get('id', ''),
+                        })
                     content_blocks.append(block)
 
                 elif chunk['type'] == 'content_block_delta':
@@ -574,6 +599,11 @@ async def chat_websocket(websocket: WebSocket):
                             tool_input_buffers[block_index] += partial
                         else:
                             logger.error(f"No buffer for block_index={block_index}!")
+                        # Send periodic keepalive to prevent ALB idle timeout (60s)
+                        now = _time.monotonic()
+                        if now - last_keepalive > 10:
+                            last_keepalive = now
+                            await websocket.send_json({"type": "tool_input_delta", "name": tool_block_names.get(block_index, "")})
 
                 elif chunk['type'] == 'content_block_stop':
                     # Update the text block with complete text
@@ -621,6 +651,16 @@ async def chat_websocket(websocket: WebSocket):
             # Log content blocks for debugging
             logger.info(f"Content blocks: {[{'type': b.get('type'), 'name': b.get('name')} for b in content_blocks]}")
 
+            # Handle stream errors: tool inputs may be incomplete/unparseable
+            if stream_error:
+                logger.warning("Stream error — sending partial text and stopping")
+                await websocket.send_json({
+                    "type": "response",
+                    "content": current_text or "Connection to AI model was interrupted. Please try again.",
+                    "toolCalls": all_tool_calls
+                })
+                break
+
             # Handle max_tokens truncation: tool_use blocks may be incomplete
             if stop_reason == "max_tokens" and has_tool_use:
                 logger.warning("Response truncated by max_tokens with incomplete tool_use blocks")
@@ -650,9 +690,10 @@ async def chat_websocket(websocket: WebSocket):
                     
                     logger.info(f"Tool use block: name={tool_name}, input_keys={list(tool_input.keys())}, has_input={bool(tool_input)}")
                     
-                    # Send tool call notification
+                    # Send tool call with full input (updates the early tool_call_start)
                     await websocket.send_json({
                         "type": "tool_call",
+                        "id": tool_use_id,
                         "name": tool_name,
                         "input": tool_input
                     })

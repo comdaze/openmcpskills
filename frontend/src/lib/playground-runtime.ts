@@ -62,45 +62,67 @@ export function createPlaygroundAdapter(
       });
 
       // Build messages in Anthropic Messages API format.
-      // When an assistant message contains tool-call parts with results,
-      // we must emit the assistant message (with tool_use blocks) followed
-      // by a user message (with tool_result blocks) — Anthropic requires this.
+      // Sequential tool calls must be split into separate assistant/user pairs.
+      // Bedrock requires: assistant(tool_use) → user(tool_result) for EACH tool call.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const apiMessages: any[] = [];
       for (const m of messages) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const content: any[] = [];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const toolResults: any[] = [];
+        if (m.role === "assistant") {
+          // Split assistant message: each tool call becomes its own
+          // assistant(text + tool_use) → user(tool_result) pair.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let pendingText: any[] = [];
 
-        for (const c of m.content) {
-          if (c.type === "text") {
-            content.push({ type: "text", text: c.text });
-          } else if (c.type === "tool-call") {
-            content.push({
-              type: "tool_use",
-              id: c.toolCallId,
-              name: c.toolName,
-              input: c.args,
-            });
-            // If this tool call has a result, queue a tool_result block
-            if (c.result !== undefined) {
-              toolResults.push({
-                type: "tool_result",
-                tool_use_id: c.toolCallId,
-                content: typeof c.result === "string" ? c.result : JSON.stringify(c.result),
+          for (const c of m.content) {
+            if (c.type === "text") {
+              pendingText.push({ type: "text", text: c.text });
+            } else if (c.type === "tool-call") {
+              // Emit assistant message with accumulated text + this tool_use
+              const assistantContent = [
+                ...pendingText,
+                {
+                  type: "tool_use",
+                  id: c.toolCallId,
+                  name: c.toolName,
+                  input: c.args,
+                },
+              ];
+              apiMessages.push({ role: "assistant", content: assistantContent });
+              pendingText = [];
+
+              // Emit matching user tool_result message
+              const resultContent = c.result !== undefined
+                ? (typeof c.result === "string" ? c.result : JSON.stringify(c.result))
+                : "Tool call was interrupted and did not complete.";
+              apiMessages.push({
+                role: "user",
+                content: [{
+                  type: "tool_result",
+                  tool_use_id: c.toolCallId,
+                  content: resultContent,
+                }],
               });
+            } else {
+              pendingText.push(c);
             }
-          } else {
-            content.push(c);
           }
-        }
 
-        apiMessages.push({ role: m.role, content });
-
-        // Append the required user tool_result message after the assistant message
-        if (toolResults.length > 0) {
-          apiMessages.push({ role: "user", content: toolResults });
+          // Any remaining text after the last tool call → standalone assistant message
+          if (pendingText.length > 0) {
+            apiMessages.push({ role: "assistant", content: pendingText });
+          }
+        } else {
+          // User message — convert text parts
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const content: any[] = [];
+          for (const c of m.content) {
+            if (c.type === "text") {
+              content.push({ type: "text", text: c.text });
+            } else {
+              content.push(c);
+            }
+          }
+          apiMessages.push({ role: m.role, content });
         }
       }
 
@@ -137,20 +159,47 @@ export function createPlaygroundAdapter(
             break;
           }
 
-          case "tool_call": {
-            // A new tool invocation is starting.  Reset text accumulator
-            // so subsequent text_delta events go into a new text part.
+          case "tool_call_start": {
+            // Early notification: tool invocation starting, input still streaming.
             currentText = "";
-            const toolCallId = (evt.id as string) || `tool_${Date.now()}`;
-            const idx = parts.length;
-            toolPartIndex[evt.name as string] = idx;
+            const earlyId = (evt.id as string) || `tool_${Date.now()}`;
+            const earlyIdx = parts.length;
+            toolPartIndex[evt.name as string] = earlyIdx;
             parts.push({
               type: "tool-call" as const,
-              toolCallId,
+              toolCallId: earlyId,
               toolName: evt.name as string,
-              args: evt.input as Record<string, unknown>,
-              argsText: JSON.stringify(evt.input),
+              args: {},
+              argsText: "Generating input…",
             });
+            yield { content: [...parts] };
+            break;
+          }
+
+          case "tool_call": {
+            // Full tool input received — update existing part or create new.
+            const tcName = evt.name as string;
+            const existingIdx = toolPartIndex[tcName];
+            if (existingIdx !== undefined && parts[existingIdx]) {
+              parts[existingIdx] = {
+                ...parts[existingIdx],
+                toolCallId: (evt.id as string) || parts[existingIdx].toolCallId,
+                args: evt.input as Record<string, unknown>,
+                argsText: JSON.stringify(evt.input),
+              };
+            } else {
+              currentText = "";
+              const toolCallId = (evt.id as string) || `tool_${Date.now()}`;
+              const idx = parts.length;
+              toolPartIndex[tcName] = idx;
+              parts.push({
+                type: "tool-call" as const,
+                toolCallId,
+                toolName: tcName,
+                args: evt.input as Record<string, unknown>,
+                argsText: JSON.stringify(evt.input),
+              });
+            }
             yield { content: [...parts] };
             break;
           }
@@ -191,8 +240,10 @@ export function createPlaygroundAdapter(
             throw new Error((evt.message as string) || "Server error");
           }
 
-          case "status": {
-            // Informational (e.g. "Loaded 43 tools") — ignore
+          case "status":
+          case "tool_input_delta":
+          case "ping": {
+            // Informational / keepalive — ignore
             break;
           }
 
