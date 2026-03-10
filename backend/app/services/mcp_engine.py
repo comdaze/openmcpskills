@@ -381,13 +381,40 @@ class MCPEngine:
                 lang_label = "Python"
                 lang_note = ""
 
+            # List pre-loaded skill files so the LLM knows what's available
+            preloaded_files: list[str] = []
+            if skill.source_path:
+                from pathlib import Path as _Path
+                _skill_dir = _Path(skill.source_path)
+                if _skill_dir.exists():
+                    for _fp in sorted(_skill_dir.rglob("*")):
+                        if not _fp.is_file():
+                            continue
+                        _rel = _fp.relative_to(_skill_dir)
+                        if any(p.startswith(".") or p == "__pycache__" for p in _rel.parts):
+                            continue
+                        if _fp.suffix == ".pyc":
+                            continue
+                        preloaded_files.append(str(_rel))
+
+            if preloaded_files:
+                code_context += "\n## Pre-loaded Skill Files\n\n"
+                code_context += "The skill's bundled scripts and resources are **already available** "
+                code_context += "in the sandbox at `./skill/`. Use them directly instead of "
+                code_context += "writing code from scratch.\n\n"
+                code_context += "**Available files:**\n"
+                for _f in preloaded_files:
+                    code_context += f"- `./skill/{_f}`\n"
+                code_context += "\n**Example usage:**\n"
+                code_context += "```bash\n"
+                code_context += "cd skill && python scripts/some_script.py arg1 arg2\n"
+                code_context += "```\n"
+                code_context += "\nPrefer calling bundled scripts over writing equivalent code.\n"
+
             code_context += "\n## How to Execute Code\n\n"
-            code_context += "Some tasks (e.g. creating new files from scratch) require generating and executing code. "
-            code_context += "Other tasks (e.g. editing existing files, reading content) may only require following the "
-            code_context += "instructions above using your own tools (Bash, Edit, etc.) without the sandbox.\n\n"
             code_context += f"**When you need to run {lang_label} code in the sandbox**, call the `execute-code` tool with:\n"
             code_context += f'- `skill`: "{tool_name}"\n'
-            code_context += f'- `code`: Your complete {lang_label} source code\n'
+            code_context += f'- `code`: Your {lang_label} source code\n'
             code_context += f'- `language`: "{runtime}"\n'
             code_context += "\nAny files your code creates will be automatically uploaded to S3 and download links will be provided to the user.\n"
             code_context += lang_note
@@ -478,12 +505,13 @@ class MCPEngine:
         start = time.monotonic()
         
         try:
-            # Execute the code directly
+            # Execute the code directly (skill files pre-loaded at /skill/)
             result = await self._code_interpreter.execute_code(
                 code=code,
                 language=language,
                 timeout=skill.manifest.execution.timeout,
                 skill_id=skill_name,
+                skill_source_path=skill.source_path,
             )
             
             duration_ms = int((time.monotonic() - start) * 1000)

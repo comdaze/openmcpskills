@@ -306,12 +306,22 @@ async def chat(request: ChatRequest):
 
         # Prepare request body
         system_prompt = (
-            "When generating Python code, ALWAYS use straight ASCII quotes (' or \") for "
-            "string delimiters. NEVER use Unicode smart/curly quotes (\u201c \u201d \u2018 \u2019) "
-            "anywhere in Python source code. When Chinese or CJK text contains quotation marks, "
-            "use corner brackets (\u300c\u300d) or escaped Unicode (\\u201c \\u201d) instead of raw "
-            "smart quote characters. Always use triple-quoted strings (\"\"\"...\"\"\") for "
-            "multi-line text or text containing mixed quote characters."
+            "You are a helpful assistant with access to MCP skills (tools). "
+            "Follow these rules strictly:\n\n"
+            "## Tool Selection Rules\n"
+            "1. ONLY call tools that are listed in the available tools. NEVER invent tool names "
+            "like $BASH, $WRITE_FILE, $TOOLS, $READ_FILE — these do NOT exist.\n"
+            "2. When multiple similar tools exist (e.g. 'docx' and 'docx-cn'), read their descriptions "
+            "carefully. Pick the one whose description best matches the user's request language and intent.\n"
+            "3. For code_interpreter skills: after calling the skill tool (which returns instructions), "
+            "generate code and call `execute-code` immediately. Do NOT try alternative approaches.\n"
+            "4. If a tool call fails, read the error message carefully before retrying. "
+            "Do NOT retry the same failed tool — try a different one or adjust your approach.\n\n"
+            "## Code Generation Rules\n"
+            "- Use straight ASCII quotes (' or \") for string delimiters in Python code.\n"
+            "- NEVER use Unicode smart/curly quotes (\u201c \u201d \u2018 \u2019) in source code.\n"
+            "- For CJK text with quotation marks, use corner brackets (\u300c\u300d) or escaped Unicode.\n"
+            "- Use triple-quoted strings (\"\"\"...\"\"\") for multi-line text."
         )
         body = {
             "anthropic_version": "bedrock-2023-05-31",
@@ -478,12 +488,22 @@ async def chat_websocket(websocket: WebSocket):
 
         # Prepare request body
         system_prompt = (
-            "When generating Python code, ALWAYS use straight ASCII quotes (' or \") for "
-            "string delimiters. NEVER use Unicode smart/curly quotes (\u201c \u201d \u2018 \u2019) "
-            "anywhere in Python source code. When Chinese or CJK text contains quotation marks, "
-            "use corner brackets (\u300c\u300d) or escaped Unicode (\\u201c \\u201d) instead of raw "
-            "smart quote characters. Always use triple-quoted strings (\"\"\"...\"\"\") for "
-            "multi-line text or text containing mixed quote characters."
+            "You are a helpful assistant with access to MCP skills (tools). "
+            "Follow these rules strictly:\n\n"
+            "## Tool Selection Rules\n"
+            "1. ONLY call tools that are listed in the available tools. NEVER invent tool names "
+            "like $BASH, $WRITE_FILE, $TOOLS, $READ_FILE — these do NOT exist.\n"
+            "2. When multiple similar tools exist (e.g. 'docx' and 'docx-cn'), read their descriptions "
+            "carefully. Pick the one whose description best matches the user's request language and intent.\n"
+            "3. For code_interpreter skills: after calling the skill tool (which returns instructions), "
+            "generate code and call `execute-code` immediately. Do NOT try alternative approaches.\n"
+            "4. If a tool call fails, read the error message carefully before retrying. "
+            "Do NOT retry the same failed tool — try a different one or adjust your approach.\n\n"
+            "## Code Generation Rules\n"
+            "- Use straight ASCII quotes (' or \") for string delimiters in Python code.\n"
+            "- NEVER use Unicode smart/curly quotes (\u201c \u201d \u2018 \u2019) in source code.\n"
+            "- For CJK text with quotation marks, use corner brackets (\u300c\u300d) or escaped Unicode.\n"
+            "- Use triple-quoted strings (\"\"\"...\"\"\") for multi-line text."
         )
         body = {
             "anthropic_version": "bedrock-2023-05-31",
@@ -505,7 +525,10 @@ async def chat_websocket(websocket: WebSocket):
         all_tool_calls = []
 
         for iteration in range(max_iterations):
+            iter_start = _time.monotonic()
             # Debug: log message structure before calling Bedrock
+            input_token_est = len(json.dumps(messages)) // 4  # rough estimate
+            logger.info(f"=== Bedrock call #{iteration+1}, est input ~{input_token_est} tokens ===")
             for mi, msg in enumerate(messages):
                 role = msg.get("role", "?")
                 content = msg.get("content")
@@ -519,6 +542,7 @@ async def chat_websocket(websocket: WebSocket):
                     logger.info(f"messages[{mi}] role={role} content={type(content)}")
 
             # Use streaming API
+            bedrock_start = _time.monotonic()
             response = await asyncio.to_thread(
                 bedrock.invoke_model_with_response_stream,
                 modelId=model_id,
@@ -632,6 +656,9 @@ async def chat_websocket(websocket: WebSocket):
                     logger.info(f"message_stop: stop_reason={stop_reason}, metrics={metrics}")
                     break
 
+            bedrock_elapsed = _time.monotonic() - bedrock_start
+            logger.info(f"Bedrock stream #{iteration+1} completed in {bedrock_elapsed:.1f}s ({event_count} events)")
+
             # Fallback: parse any tool_input_buffers that were not parsed via content_block_stop
             for idx, buffer in tool_input_buffers.items():
                 if idx < len(content_blocks) and content_blocks[idx].get('type') == 'tool_use':
@@ -699,25 +726,27 @@ async def chat_websocket(websocket: WebSocket):
                     })
                     
                     logger.info(f"Calling tool: {tool_name}")
-                    
+                    tool_start = _time.monotonic()
+
                     # Special handling for code execution
                     if tool_name in ("execute-code", "execute-python-code"):
-                        logger.info(f"Detected {tool_name}, extracting parameters...")
-                        logger.info(f"Full tool_input: {tool_input}")
                         # Extract skill, code, and language from input
                         skill = tool_input.get("skill", "code-execution")
                         code = tool_input.get("code", "")
                         language = tool_input.get("language", "python")
-                        logger.info(f"Skill: {skill}, Language: {language}, Code length: {len(code)}")
+                        logger.info(f"execute-code: skill={skill}, lang={language}, code_len={len(code)}")
                         if not code:
                             logger.error(f"No code provided! tool_input keys: {list(tool_input.keys())}")
                         exec_result = await execute_code_in_sandbox(mcp_url, skill, code, language)
-                        logger.info(f"Code execution result: {exec_result.get('text', '')[:200]}")
+                        tool_elapsed = _time.monotonic() - tool_start
+                        logger.info(f"execute-code completed in {tool_elapsed:.1f}s: {exec_result.get('text', '')[:200]}")
                         result = exec_result.get("text", "Code executed")
                         execution_info = exec_result.get("execution")
                         files = exec_result.get("files", [])
                     else:
                         result = await call_mcp_tool(mcp_url, tool_name, tool_input)
+                        tool_elapsed = _time.monotonic() - tool_start
+                        logger.info(f"Tool {tool_name} completed in {tool_elapsed:.1f}s")
                         execution_info = None
                         files = []
 
@@ -762,6 +791,8 @@ async def chat_websocket(websocket: WebSocket):
             messages.append({"role": "assistant", "content": content_blocks})
             messages.append({"role": "user", "content": tool_results})
             body["messages"] = messages
+            iter_elapsed = _time.monotonic() - iter_start
+            logger.info(f"=== Iteration #{iteration+1} total: {iter_elapsed:.1f}s ===")
 
         # If we hit max iterations
         if iteration >= max_iterations - 1:

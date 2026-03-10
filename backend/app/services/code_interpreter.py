@@ -195,6 +195,93 @@ class CodeInterpreterService:
             logger.error(f"S3 upload failed: {result['stderr']}")
             return None
 
+    def _preload_skill_files(self, session_id: str, source_path: str) -> bool:
+        """Pre-load skill's bundled files into sandbox at /skill/ directory.
+
+        Creates a tar.gz archive of the skill directory, embeds it as
+        base64 inside a single Python snippet executed via ``executeCode``,
+        which decodes and extracts it in one API call.
+        """
+        import base64
+        import io
+        import tarfile
+        from pathlib import Path
+
+        preload_start = time.monotonic()
+
+        skill_dir = Path(source_path)
+        if not skill_dir.exists():
+            logger.warning(f"Skill source path not found: {source_path}")
+            return False
+
+        # Build tar.gz in memory
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for file_path in sorted(skill_dir.rglob("*")):
+                if not file_path.is_file():
+                    continue
+                rel = file_path.relative_to(skill_dir)
+                # Skip hidden files, __pycache__, .pyc
+                if any(p.startswith(".") or p == "__pycache__" for p in rel.parts):
+                    continue
+                if file_path.suffix == ".pyc":
+                    continue
+                tar.add(str(file_path), arcname=str(Path("skill") / rel))
+
+        tar_bytes = buf.getvalue()
+
+        # Safety limit: skip if archive > 5 MB
+        if len(tar_bytes) > 5 * 1024 * 1024:
+            logger.warning(
+                f"Skill archive too large ({len(tar_bytes)} bytes), skipping preload"
+            )
+            return False
+
+        b64_data = base64.b64encode(tar_bytes).decode("ascii")
+
+        # Single executeCode call: decode + extract in one shot
+        extract_code = (
+            "import base64, io, tarfile, os\n"
+            f"data = base64.b64decode('{b64_data}')\n"
+            "tar = tarfile.open(fileobj=io.BytesIO(data), mode='r:gz')\n"
+            "tar.extractall('.')\n"
+            "tar.close()\n"
+            "files = []\n"
+            "for r, d, fs in os.walk('skill'):\n"
+            "    for f in fs:\n"
+            "        files.append(os.path.join(r, f))\n"
+            "print(f'OK:{len(files)} files')\n"
+        )
+
+        resp = self.client.invoke_code_interpreter(
+            codeInterpreterIdentifier=self.code_interpreter_id,
+            sessionId=session_id,
+            name="executeCode",
+            arguments={"language": "python", "code": extract_code},
+        )
+
+        # Check result
+        ok = False
+        for event in resp.get("stream", []):
+            result = event.get("result", {})
+            for item in result.get("content", []):
+                if item.get("type") == "text" and "OK" in item.get("text", ""):
+                    ok = True
+                if item.get("type") == "error":
+                    logger.error(
+                        f"Preload extract error: {item.get('text', '')}"
+                    )
+
+        elapsed = time.monotonic() - preload_start
+        if ok:
+            logger.info(
+                f"Pre-loaded skill files to ./skill/ "
+                f"({len(tar_bytes)} bytes compressed, {elapsed:.1f}s)"
+            )
+        else:
+            logger.error(f"Failed to pre-load skill files ({elapsed:.1f}s)")
+        return ok
+
     async def execute_code(
         self,
         code: str,
@@ -203,11 +290,14 @@ class CodeInterpreterService:
         files: list[UploadFile] | None = None,
         network_mode: NetworkMode = NetworkMode.SANDBOX,
         skill_id: str = "code-execution",
+        skill_source_path: str | None = None,
     ) -> ExecutionResult:
         timeout = timeout or self.default_timeout
         session_id = None
         try:
             session_id = await self._start_session()
+            if skill_source_path:
+                self._preload_skill_files(session_id, skill_source_path)
             if files:
                 await self._write_files(session_id, files)
             result = await self._execute_in_session(session_id, code, language, timeout)
