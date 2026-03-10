@@ -231,7 +231,12 @@ class MCPEngine:
         if self._code_interpreter:
             tools.append({
                 "name": "execute-code",
-                "description": "Execute code in a secure sandbox. Use this after a code_interpreter skill returns instructions and you've generated the code. Supports Python and JavaScript (Deno).",
+                "description": (
+                    "Execute code in a secure sandbox. Use this after a code_interpreter "
+                    "skill returns instructions and you've generated the code. Supports "
+                    "Python and JavaScript (Deno). For large outputs (e.g. many slides), "
+                    "use session_id + keep_session to build incrementally across multiple calls."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -241,12 +246,20 @@ class MCPEngine:
                         },
                         "code": {
                             "type": "string",
-                            "description": "The complete code to execute"
+                            "description": "The code to execute"
                         },
                         "language": {
                             "type": "string",
                             "enum": ["python", "javascript"],
                             "description": "The programming language (default: python)"
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Reuse an existing sandbox session from a previous keep_session call. Omit for the first call."
+                        },
+                        "keep_session": {
+                            "type": "boolean",
+                            "description": "Keep the sandbox session alive after execution so subsequent calls can continue building on the same files. Set true for intermediate chunks, false (or omit) for the final chunk."
                         }
                     },
                     "required": ["skill", "code"]
@@ -328,6 +341,8 @@ class MCPEngine:
                 "skill": arguments.get("skill", ""),
                 "code": arguments.get("code", ""),
                 "language": arguments.get("language", "python"),
+                "session_id": arguments.get("session_id"),
+                "keep_session": arguments.get("keep_session", False),
             }, session_id)
 
         # Get the skill (lazy loading)
@@ -418,6 +433,39 @@ class MCPEngine:
             code_context += f'- `language`: "{runtime}"\n'
             code_context += "\nAny files your code creates will be automatically uploaded to S3 and download links will be provided to the user.\n"
             code_context += lang_note
+
+            code_context += "\n## Incremental Generation (for large outputs)\n\n"
+            code_context += (
+                "If the output is large (e.g. a presentation with many slides, "
+                "a long document with many sections), **split the work across "
+                "multiple `execute-code` calls** to avoid code truncation:\n\n"
+            )
+            code_context += (
+                "1. **First call**: Generate code for the first few slides/sections. "
+                "Set `keep_session: true`. The response will include a `session_id`.\n"
+            )
+            code_context += (
+                "2. **Middle calls**: Use the returned `session_id` and `keep_session: true`. "
+                "Your code runs in the same sandbox — all files from previous calls are still there. "
+                "Continue building (e.g. add more slides to the same file).\n"
+            )
+            code_context += (
+                "3. **Final call**: Use the `session_id` but set `keep_session: false` (or omit it). "
+                "This collects all generated files and returns download links.\n\n"
+            )
+            code_context += (
+                "**Key rule**: Each call's code should be **small and self-contained** "
+                "(~2-4 slides or sections). The sandbox filesystem persists between calls, "
+                "so you can append to files, read previous output, etc.\n\n"
+            )
+            code_context += (
+                "**Example pattern** (3-call PPTX generation):\n"
+                "```\n"
+                "Call 1: keep_session=true  → create pptx, add slides 1-4, save to output.pptx\n"
+                "Call 2: keep_session=true, session_id=<id>  → load output.pptx, add slides 5-8, save\n"
+                "Call 3: keep_session=false, session_id=<id> → load output.pptx, add slides 9-12, save → gets download link\n"
+                "```\n"
+            )
             
             instruction_content += code_context
 
@@ -469,64 +517,89 @@ class MCPEngine:
         session_id: str | None,
     ) -> dict[str, Any]:
         """Handle code/execute request for code_interpreter skills.
-        
+
         Executes LLM-generated code in the sandbox.
+        Supports incremental/chunked execution via session_id + keep_session.
         """
         skill_name = params.get("skill")
         code = params.get("code")
         language = params.get("language", "python")
-        
+        sandbox_session_id = params.get("session_id")  # reuse existing sandbox
+        keep_session = params.get("keep_session", False)
+
         if not skill_name or not code:
             return self._error_response(msg_id, -32602, "Missing skill or code")
-        
+
         if session_id:
             await self._session_manager.update_activity(session_id)
-        
+
         # Get the skill
         skill = await self._skill_loader.get_skill(skill_name)
         if not skill:
             return self._error_response(msg_id, -32602, f"Skill not found: {skill_name}")
-        
+
         if skill.manifest.execution.type != "code_interpreter":
             return self._error_response(
-                msg_id, -32602, 
+                msg_id, -32602,
                 f"Skill {skill_name} is not a code_interpreter skill"
             )
-        
+
         # Execute code in sandbox
         from app.services.code_interpreter import ExecutionResult, ExecutionStatus
-        
+
         if not self._code_interpreter:
             return self._error_response(
-                msg_id, -32603, 
+                msg_id, -32603,
                 "Code interpreter service not configured"
             )
-        
+
         start = time.monotonic()
-        
+
         try:
-            # Execute the code directly (skill files pre-loaded at /skill/)
             result = await self._code_interpreter.execute_code(
                 code=code,
                 language=language,
                 timeout=skill.manifest.execution.timeout,
                 skill_id=skill_name,
                 skill_source_path=skill.source_path,
+                session_id=sandbox_session_id,
+                keep_session=keep_session,
             )
-            
+
             duration_ms = int((time.monotonic() - start) * 1000)
-            
+
             # Log invocation
             self._log_invocation(
                 skill_name, session_id, duration_ms,
                 "success" if result.status.value == "success" else "error",
-                {"code_length": len(code)}
+                {"code_length": len(code), "keep_session": keep_session}
             )
-            
-            # Build response text with download links
-            text_parts = [result.stdout or "Execution completed"]
+
+            # Extract __session_id__ marker from stdout if present
+            returned_session_id = None
+            clean_stdout = result.stdout
+            if "__session_id__:" in clean_stdout:
+                lines = clean_stdout.split("\n")
+                clean_lines = []
+                for line in lines:
+                    if line.startswith("__session_id__:"):
+                        returned_session_id = line.split(":", 1)[1].strip()
+                    else:
+                        clean_lines.append(line)
+                clean_stdout = "\n".join(clean_lines).rstrip()
+
+            # Build response text
+            text_parts = [clean_stdout or "Execution completed"]
             if result.stderr:
                 text_parts.append(f"\n⚠️ Errors:\n{result.stderr}")
+
+            if keep_session and returned_session_id:
+                text_parts.append(
+                    f"\n✅ Session kept alive. Use `session_id`: `{returned_session_id}` "
+                    f"in the next `execute-code` call to continue building in the same sandbox. "
+                    f"Set `keep_session: false` on the final call to collect output files."
+                )
+
             if result.output_files:
                 text_parts.append("\n\n## Generated Files - Download Links")
                 text_parts.append("IMPORTANT: You MUST display the following download links to the user exactly as provided. Do NOT omit, summarize, or paraphrase these URLs.\n")
@@ -534,8 +607,8 @@ class MCPEngine:
                     url = f.get("download_url", "")
                     name = f.get("filename", "unknown")
                     text_parts.append(f"[Download {name}]({url})")
-            
-            return self._success_response(msg_id, {
+
+            response_data: dict[str, Any] = {
                 "content": [{
                     "type": "text",
                     "text": "\n".join(text_parts),
@@ -543,14 +616,18 @@ class MCPEngine:
                 "execution": {
                     "status": result.status.value,
                     "exit_code": result.exit_code,
-                    "stdout": result.stdout,
+                    "stdout": clean_stdout,
                     "stderr": result.stderr,
                     "duration_ms": result.duration_ms,
                 },
                 "files": result.output_files or [],
                 "isError": result.status.value != "success",
-            })
-            
+            }
+            if returned_session_id:
+                response_data["session_id"] = returned_session_id
+
+            return self._success_response(msg_id, response_data)
+
         except Exception as e:
             logger.exception(f"Code execution failed: {e}")
             return self._error_response(msg_id, -32603, f"Execution error: {str(e)}")

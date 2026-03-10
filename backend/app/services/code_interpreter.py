@@ -95,6 +95,9 @@ class CodeInterpreterService:
         ".mp3", ".mp4", ".wav",
     }
 
+    # How long a kept-alive session can sit idle before we reclaim it (seconds).
+    _SESSION_IDLE_TTL = 600  # 10 minutes
+
     def __init__(
         self,
         region: str | None = None,
@@ -113,6 +116,10 @@ class CodeInterpreterService:
         self.s3_prefix = s3_prefix or settings.code_interpreter_s3_prefix
         self._client = None
         self._session_lock = asyncio.Lock()
+
+        # Persistent sessions for chunked/incremental code generation.
+        # Maps session_id -> {"last_active": float, "skill_id": str, "preloaded": bool}
+        self._kept_sessions: dict[str, dict[str, Any]] = {}
 
     @property
     def client(self):
@@ -282,6 +289,18 @@ class CodeInterpreterService:
             logger.error(f"Failed to pre-load skill files ({elapsed:.1f}s)")
         return ok
 
+    async def _cleanup_expired_sessions(self) -> None:
+        """Stop and remove sessions that have been idle too long."""
+        now = time.monotonic()
+        expired = [
+            sid for sid, info in self._kept_sessions.items()
+            if now - info["last_active"] > self._SESSION_IDLE_TTL
+        ]
+        for sid in expired:
+            logger.info(f"Cleaning up expired kept session: {sid}")
+            self._kept_sessions.pop(sid, None)
+            await self._stop_session(sid)
+
     async def execute_code(
         self,
         code: str,
@@ -291,18 +310,53 @@ class CodeInterpreterService:
         network_mode: NetworkMode = NetworkMode.SANDBOX,
         skill_id: str = "code-execution",
         skill_source_path: str | None = None,
+        session_id: str | None = None,
+        keep_session: bool = False,
     ) -> ExecutionResult:
+        """Execute code in a sandbox session.
+
+        Args:
+            session_id: If provided, reuse this existing session instead of
+                creating a new one. The session must have been kept alive by
+                a previous call with ``keep_session=True``.
+            keep_session: If True, keep the sandbox session alive after
+                execution so subsequent calls can reuse it. Output files
+                are NOT collected until the final call (keep_session=False).
+        """
         timeout = timeout or self.default_timeout
-        session_id = None
+        reusing = False
+        # Opportunistic cleanup of expired sessions
+        await self._cleanup_expired_sessions()
+
         try:
-            session_id = await self._start_session()
-            if skill_source_path:
-                self._preload_skill_files(session_id, skill_source_path)
+            if session_id and session_id in self._kept_sessions:
+                # Reuse existing session
+                reusing = True
+                self._kept_sessions[session_id]["last_active"] = time.monotonic()
+                logger.info(f"Reusing kept session: {session_id}")
+            else:
+                # Start a new session
+                session_id = await self._start_session()
+                if skill_source_path:
+                    self._preload_skill_files(session_id, skill_source_path)
+
             if files:
                 await self._write_files(session_id, files)
             result = await self._execute_in_session(session_id, code, language, timeout)
-            
-            # Upload generated files to S3 if execution was successful
+
+            if keep_session:
+                # Keep session alive — store it and return session_id in stdout
+                self._kept_sessions[session_id] = {
+                    "last_active": time.monotonic(),
+                    "skill_id": skill_id,
+                    "preloaded": True,
+                }
+                # Append session_id marker so the engine can pass it back
+                result.stdout += f"\n__session_id__:{session_id}"
+                logger.info(f"Keeping session alive: {session_id}")
+                return result
+
+            # Final call (or single-shot) — collect output files and stop
             if result.status == ExecutionStatus.SUCCESS and self.s3_bucket:
                 uploaded_files = []
                 # List files in working directory AND /tmp (models often save to /tmp)
@@ -332,7 +386,7 @@ class CodeInterpreterService:
 
                 # Update result with uploaded files
                 result.output_files = uploaded_files
-            
+
             return result
         except asyncio.TimeoutError:
             return ExecutionResult(
@@ -353,7 +407,8 @@ class CodeInterpreterService:
                 stdout="", stderr=str(e), duration_ms=0,
             )
         finally:
-            if session_id:
+            if session_id and not keep_session:
+                self._kept_sessions.pop(session_id, None)
                 await self._stop_session(session_id)
 
     async def _start_session(self) -> str:
