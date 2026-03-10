@@ -521,6 +521,7 @@ async def chat_websocket(websocket: WebSocket):
                 await websocket.send_json({"type": "status", "message": f"Loaded {len(tools)} tools"})
 
         # Invoke model (may need multiple rounds for tool use)
+        import time as _time
         max_iterations = 15
         all_tool_calls = []
 
@@ -569,7 +570,6 @@ async def chat_websocket(websocket: WebSocket):
             tool_input_buffers = {}  # Buffer for accumulating tool inputs
             tool_block_names = {}   # Map block_index -> tool name for early notification
             event_count = 0
-            import time as _time
             last_keepalive = _time.monotonic()
 
             stream_error = False
