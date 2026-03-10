@@ -260,8 +260,9 @@ async def chat(request: ChatRequest):
         mcp_url = request.mcpServerUrl or request.mcp_server_url or settings.mcp_server_url
         bedrock_endpoint = request.bedrockEndpoint or request.bedrock_endpoint or settings.bedrock_endpoint
 
-        # Initialize Bedrock client
-        client_kwargs = {"region_name": settings.aws_region}
+        # Initialize Bedrock client with extended read timeout (Opus can be slow)
+        bedrock_config = Config(read_timeout=300, retries={'max_attempts': 0})
+        client_kwargs = {"region_name": settings.aws_region, "config": bedrock_config}
         if bedrock_endpoint:
             client_kwargs["endpoint_url"] = bedrock_endpoint
 
@@ -413,14 +414,12 @@ async def chat_websocket(websocket: WebSocket):
     try:
         # Receive initial message
         data = await websocket.receive_json()
-        message = data.get("message")
-        history = data.get("history", [])
         model = data.get("model", "claude-opus-4-5")
         use_mcp = data.get("useMcpServer", True)
         mcp_url = data.get("mcpServerUrl")
-        
+
         settings = get_settings()
-        
+
         # Get model ID
         model_ids = {
             "claude-opus-4-6": settings.claude_opus_4_6_model_id,
@@ -428,16 +427,16 @@ async def chat_websocket(websocket: WebSocket):
             "claude-sonnet-4-5": settings.claude_sonnet_model_id,
             "claude-haiku-4-5": settings.claude_haiku_model_id,
         }
-        
+
         model_id = model_ids.get(model)
         if not model_id:
             await websocket.send_json({"type": "error", "message": f"Invalid model: {model}"})
             await websocket.close()
             return
 
-        mcp_url = mcp_url or settings.mcp_server_url
+        mcp_url = mcp_url or data.get("mcpServerUrl") or settings.mcp_server_url
         bedrock_endpoint = data.get("bedrockEndpoint") or settings.bedrock_endpoint
-        
+
         # Initialize Bedrock client with extended read timeout for streaming
         bedrock_config = Config(read_timeout=300, retries={'max_attempts': 0})
         client_kwargs = {"region_name": settings.aws_region, "config": bedrock_config}
@@ -446,11 +445,36 @@ async def chat_websocket(websocket: WebSocket):
 
         bedrock = boto3.client("bedrock-runtime", **client_kwargs)
 
-        # Build messages
+        # Build messages — support both new format (messages array) and legacy (message + history)
         messages = []
-        for msg in history:
-            messages.append({"role": msg.get("role"), "content": msg.get("content")})
-        messages.append({"role": "user", "content": message})
+        if data.get("messages"):
+            for msg in data["messages"]:
+                content = msg.get("content")
+                if isinstance(content, str):
+                    messages.append({"role": msg["role"], "content": content})
+                elif isinstance(content, list):
+                    text_parts = []
+                    has_non_text = False
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif isinstance(block, str):
+                            text_parts.append(block)
+                        else:
+                            has_non_text = True
+                            break
+                    if not has_non_text and text_parts:
+                        messages.append({"role": msg["role"], "content": "\n".join(text_parts)})
+                    else:
+                        messages.append({"role": msg["role"], "content": content})
+                else:
+                    messages.append({"role": msg["role"], "content": str(content)})
+        else:
+            # Legacy format: message + history
+            for msg in data.get("history", []):
+                messages.append({"role": msg.get("role"), "content": msg.get("content")})
+            if data.get("message"):
+                messages.append({"role": "user", "content": data["message"]})
 
         # Prepare request body
         system_prompt = (
@@ -677,13 +701,13 @@ async def chat_websocket(websocket: WebSocket):
                     await websocket.send_json(tool_result_msg)
                     
                     tool_results.append({
-                        "toolResult": {
-                            "toolUseId": tool_use_id,
-                            "content": [{"text": result}],
-                        }
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": result,
                     })
-            
+
             # Add assistant message and tool results to conversation
+            # invoke_model uses Anthropic Messages API format
             messages.append({"role": "assistant", "content": content_blocks})
             messages.append({"role": "user", "content": tool_results})
             body["messages"] = messages

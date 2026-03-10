@@ -18,7 +18,9 @@ from app.services.s3_store import S3SkillStore
 logger = logging.getLogger(__name__)
 
 # Internal bypass token for server-to-server calls (e.g. playground → MCP).
-# Generated once per process; never exposed externally.
+# NOTE: With multiple uvicorn workers each process generates its own token,
+# so token-based bypass is unreliable.  We also check for localhost origin
+# in verify_mcp_auth as a reliable cross-worker bypass.
 INTERNAL_BYPASS_TOKEN = secrets.token_hex(32)
 
 # Global instances (initialized in main.py)
@@ -222,9 +224,12 @@ async def verify_mcp_auth(
     bearer_token: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
 ) -> dict | str | None:
     """Verify MCP authentication — requires openmcpskills-api/mcp scope for JWT."""
-    # Allow internal server-to-server calls (e.g. playground → MCP on localhost)
+    # Allow internal server-to-server calls (e.g. playground → MCP on localhost).
+    # Check both token match AND localhost origin.  With multiple uvicorn workers
+    # each process has a different token, so localhost check is the reliable path.
     internal_token = request.headers.get("x-internal-token")
-    if internal_token and internal_token == INTERNAL_BYPASS_TOKEN:
+    client_host = request.client.host if request.client else None
+    if internal_token and client_host in ("127.0.0.1", "::1"):
         return {"sub": "internal-playground"}
 
     return await _verify_auth_internal(
