@@ -156,11 +156,17 @@ export function createPlaygroundAdapter(
           }
 
           case "tool_result": {
-            // Update the matching tool-call part with the result
+            // Update the matching tool-call part with the full result object
+            // (text, execution info, files) so McpToolUI can display them.
             const name = evt.name as string;
             const idx = toolPartIndex[name];
             if (idx !== undefined && parts[idx]) {
-              parts[idx] = { ...parts[idx], result: evt.result as string };
+              const toolResult: Record<string, unknown> = {
+                text: evt.result as string,
+              };
+              if (evt.execution) toolResult.execution = evt.execution;
+              if (evt.files) toolResult.files = evt.files;
+              parts[idx] = { ...parts[idx], result: toolResult };
             }
             yield { content: [...parts] };
             break;
