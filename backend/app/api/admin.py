@@ -556,19 +556,17 @@ async def import_from_github(
         if not skills_dir.exists():
             raise HTTPException(status_code=404, detail=f"Path not found: {path}")
 
-        # Check if URL points to a single skill directory
+        # Determine skill directories to import
+        # If URL points to a single skill (has SKILL.md), import just that one
         if (skills_dir / "SKILL.md").exists():
-            raise HTTPException(
-                status_code=400,
-                detail=f"URL points to a single skill '{skills_dir.name}'. Please use the parent directory URL to import skills."
-            )
+            skill_dirs = [skills_dir]
+        else:
+            skill_dirs = [
+                item for item in skills_dir.iterdir()
+                if item.is_dir() and (item / "SKILL.md").exists()
+            ]
 
-        for item in skills_dir.iterdir():
-            if not item.is_dir():
-                continue
-            # Check if it's a valid skill (has SKILL.md)
-            if not (item / "SKILL.md").exists():
-                continue
+        for item in skill_dirs:
 
             skill_name = item.name
             dest_path = settings.skills_path / skill_name
